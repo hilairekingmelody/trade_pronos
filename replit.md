@@ -1,45 +1,45 @@
-# [Project name]
+# Telegram Bot Starter
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A reusable Python Telegram bot template built with pyTelegramBotAPI.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- `python main.py` — start the Telegram bot
+- Required secret: `TELEGRAM_BOT_TOKEN`
+- Optional environment variable: `LOG_LEVEL` (defaults to `INFO`)
 
 ## Stack
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Python
+- pyTelegramBotAPI (`telebot`)
+- python-dotenv
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `main.py` — bot setup, handlers, and polling loop
+- `.env.example` — local environment variable template
+- `requirements.txt` — Python dependencies
+- `README.md` — setup and customization guide
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Long polling is used because it runs without a public webhook URL.
+- The bot token is loaded from the environment and is never hardcoded.
+- Startup exits with a clear error when the token is missing.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+The starter responds to `/start`, `/help`, and `/ping`, and echoes text messages.
+It is intentionally small so new handlers and business logic can be added easily.
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+Keep the bot simple, readable, and easy to customize.
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- Add `TELEGRAM_BOT_TOKEN` as a secret before running the bot.
+- Do not commit `.env` or paste the token into source files.
 
 ## Pointers
-
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+- See `README.md` for the full setup guide.
