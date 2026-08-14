@@ -1,99 +1,137 @@
-"""A small, reusable Telegram bot starter built with pyTelegramBotAPI."""
+import telebot, requests, json, ta
+from datetime import datetime
 
-from __future__ import annotations
+# ========== COLLE TES CLES ICI ==========
+TOKEN = "8755889100 : AAFtWG5vnuj Rl -6rK4We KSD WudC_Lf1kYBs"
+FOOTBALL_KEY = "3744e5ea2a2017438f7c81ed63417b3d"
+# ========================================
 
-import html
-import logging
-import os
-import sys
+bot = telebot.TeleBot(TOKEN)
+DATA_FILE = "journal.json"
+WARN = "⚠️ Risque de perte totale. Rien n’est sûr. -18 ans interdit. Trade/Mise responsable."
 
-import telebot
-from dotenv import load_dotenv
-
-
-LOGGER = logging.getLogger("telegram_bot")
-
-
-def configure_logging() -> None:
-    """Configure readable logs for local development and Replit."""
-    logging.basicConfig(
-        level=os.getenv("LOG_LEVEL", "INFO").upper(),
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    )
-
-
-def load_bot() -> telebot.TeleBot:
-    """Load the bot token and create the TeleBot instance."""
-    load_dotenv()
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-
-    if not token:
-        raise RuntimeError(
-            "TELEGRAM_BOT_TOKEN is missing. Add it in Replit Secrets "
-            "or create a local .env file from .env.example."
-        )
-
-    return telebot.TeleBot(token, parse_mode="HTML")
-
-
-def register_handlers(bot: telebot.TeleBot) -> None:
-    """Register the starter command and message handlers."""
-
-    @bot.message_handler(commands=["start"])
-    def handle_start(message: telebot.types.Message) -> None:
-        first_name = html.escape(message.from_user.first_name or "there")
-        bot.reply_to(
-            message,
-            (
-                f"Hi, <b>{first_name}</b>! Welcome to your new Telegram bot.\n\n"
-                "Send me a message and I’ll echo it back.\n"
-                "Use /help to see what I can do."
-            ),
-        )
-
-    @bot.message_handler(commands=["help"])
-    def handle_help(message: telebot.types.Message) -> None:
-        bot.reply_to(
-            message,
-            (
-                "<b>Available commands</b>\n"
-                "/start — welcome message\n"
-                "/help — show this help message\n"
-                "/ping — check that the bot is online"
-            ),
-        )
-
-    @bot.message_handler(commands=["ping"])
-    def handle_ping(message: telebot.types.Message) -> None:
-        bot.reply_to(message, "Pong! The bot is online.")
-
-    @bot.message_handler(content_types=["text"])
-    def handle_text(message: telebot.types.Message) -> None:
-        bot.reply_to(message, f"You said: {html.escape(message.text or '')}")
-
-
-def main() -> int:
-    configure_logging()
-
+def load_journal():
     try:
-        bot = load_bot()
-    except RuntimeError as error:
-        LOGGER.error(error)
-        return 1
+        return json.load(open(DATA_FILE))
+    except:
+        return {"trades": []}
 
-    register_handlers(bot)
-    LOGGER.info("Telegram bot started in polling mode.")
+def save_journal(data):
+    json.dump(data, open(DATA_FILE, "w"))
 
+# ========== COMMANDES DE BASE ==========
+@bot.message_handler(commands=['start'])
+def start(msg):
+    bot.reply_to(msg, f"**Bot N2 Trading + Stats v1.0** ✅\n\nTrading Crypto + Analyse Foot\nTape /cmds pour voir tout\n{WARN}", parse_mode="Markdown")
+
+@bot.message_handler(commands=['cmds'])
+def cmds(msg):
+    texte = "**Commandes Disponibles:**\n"
+    texte += "/crypto BTCUSDT → Signal RSI/MACD\n"
+    texte += "/backtest BTCUSDT → Test stratégie\n"
+    texte += "/match Real vs Barça → Stats H2H\n"
+    texte += "/coupon → Matchs du jour\n"
+    texte += "/bankroll 100000 2% → Calcule mise\n"
+    texte += "/journal +2500 → Note un gain/perte\n\n" + WARN
+    bot.send_message(msg.chat.id, texte, parse_mode="Markdown")
+
+# ========== 1. MODULE TRADING ==========
+@bot.message_handler(commands=['crypto'])
+def signal_crypto(msg):
     try:
-        bot.infinity_polling(skip_pending=True)
-    except KeyboardInterrupt:
-        LOGGER.info("Telegram bot stopped.")
-    except Exception:
-        LOGGER.exception("Telegram bot stopped unexpectedly.")
-        return 1
+        pair = msg.text.split()[1].upper()
+        url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval=1h&limit=100"
+        data = requests.get(url).json()
+        closes = [float(c[4]) for c in data]
+        rsi = ta.momentum.RSIIndicator(closes).rsi().iloc[-1]
+        macd = ta.trend.MACD(closes).macd_diff().iloc[-1]
 
-    return 0
+        if rsi<30 and macd>0: signal = "🟢 ACHAT Potentiel"
+        elif rsi>70 and macd<0: signal = "🔴 VENTE Potentielle"
+        else: signal = "🟡 NEUTRE - Attendre"
 
+        bot.send_message(msg.chat.id, f"**{pair} - Timeframe 1H**\nPrix: {closes[-1]:.2f}\nRSI: {rsi:.1f} | MACD: {macd:.4f}\nSignal: {signal}\n\n{WARN}", parse_mode="Markdown")
+    except:
+        bot.reply_to(msg, "Format: /crypto BTCUSDT")
 
-if __name__ == "__main__":
-    sys.exit(main())
+@bot.message_handler(commands=['backtest'])
+def backtest(msg):
+    try:
+        pair = msg.text.split()[1].upper()
+        data = requests.get(f"https://api.binance.com/api/v3/klines?symbol={pair}&interval=1h&limit=100").json()
+        closes = [float(c[4]) for c in data]
+        wins,total=0,0
+        for i in range(50, len(closes)-1):
+            rsi = ta.momentum.RSIIndicator(closes[:i]).rsi().iloc[-1]
+            if rsi<30 and closes[i+1]>closes[i]: wins+=1
+            if rsi>70 and closes[i+1]<closes[i]: wins+=1
+            total+=1
+        winrate = (wins/total)*100 if total>0 else 0
+        bot.send_message(msg.chat.id, f"**Backtest {pair} 1H**\nTrades simulés: {total}\nWinrate: {winrate:.1f}%\n\n{WARN}", parse_mode="Markdown")
+    except:
+        bot.reply_to(msg, "Format: /backtest ETHUSDT")
+
+# ========== 2. MODULE PARIS SPORTIFS ==========
+@bot.message_handler(commands=['match'])
+def match(msg):
+    try:
+        equipes = msg.text.replace("/match ", "").split(" vs ")
+        e1, e2 = equipes[0].strip(), equipes[1].strip()
+        headers = {"x-apisports-key": FOOTBALL_KEY}
+
+        r1 = requests.get(f"https://v3.football.api-sports.io/teams?search={e1}", headers=headers).json()
+        r2 = requests.get(f"https://v3.football.api-sports.io/teams?search={e2}", headers=headers).json()
+        if not r1['response'] or not r2['response']: return bot.reply_to(msg, "Équipe introuvable")
+
+        id1, id2 = r1['response'][0]['team']['id'], r2['response'][0]['team']['id']
+        h2h = requests.get(f"https://v3.football.api-sports.io/fixtures/headtohead?h2h={id1}-{id2}&last=5", headers=headers).json()
+
+        texte = f"**{e1} vs {e2} - 5 derniers H2H**\n\n"
+        for m in h2h['response']:
+            home = m['teams']['home']['name']
+            away = m['teams']['away']['name']
+            score = f"{m['goals']['home']}-{m['goals']['away']}"
+            texte += f"{home} {score} {away}\n"
+        texte += f"\n{WARN}"
+        bot.send_message(msg.chat.id, texte, parse_mode="Markdown")
+    except:
+        bot.reply_to(msg, "Format: /match PSG vs OM")
+
+@bot.message_handler(commands=['coupon'])
+def coupon(msg):
+    headers = {"x-apisports-key": FOOTBALL_KEY}
+    date = datetime.now().strftime("%Y-%m-%d")
+    url = f"https://v3.football.api-sports.io/fixtures?league=39&season=2024&date={date}" # PL
+    data = requests.get(url, headers=headers).json()
+    texte = f"**Matchs PL du {date}:**\n"
+    for m in data['response'][:3]:
+        texte += f"• {m['teams']['home']['name']} vs {m['teams']['away']['name']}\n"
+    texte += f"\nFais /match EquipeA vs EquipeB pour analyse\n{WARN}"
+    bot.send_message(msg.chat.id, texte, parse_mode="Markdown")
+
+# ========== 3. MODULE GESTION ==========
+@bot.message_handler(commands=['bankroll'])
+def bankroll(msg):
+    try:
+        capital, risk = msg.text.split()[1:]
+        capital, risk = float(capital), float(risk.replace("%",""))
+        if risk > 5:
+            return bot.reply_to(msg, "⚠️ Risque >5% refusé. Protège ton capital.")
+        mise = capital * risk / 100
+        bot.reply_to(msg, f"Capital: {capital} FCFA\nRisque: {risk}%\nMise conseillée: {mise} FCFA")
+    except:
+        bot.reply_to(msg, "Format: /bankroll 100000 2%")
+
+@bot.message_handler(commands=['journal'])
+def journal(msg):
+    data = load_journal()
+    parts = msg.text.split()
+    if len(parts) > 1:
+        gain = float(parts[1].replace("+",""))
+        data["trades"].append({"date": str(datetime.now().date()), "gain": gain})
+        save_journal(data)
+        bot.reply_to(msg, f"✅ Noté: {gain} FCFA")
+    total = sum(t["gain"] for t in data["trades"][-30:])
+    bot.send_message(msg.chat.id, f"**Journal 30 jours:** {total} FCFA\nTrades: {len(data['trades'])}\n\n{WARN}", parse_mode="Markdown")
+
+bot.polling()
