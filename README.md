@@ -6,8 +6,10 @@ an echo handler that you can replace with your own bot logic.
 
 ## Setup
 
-1. Create a bot with [@BotFather](https://t.me/BotFather) and copy its token.
-2. Add the token as a Replit Secret named `TELEGRAM_BOT_TOKEN`.
+1. Create a bot with [@BotFather](https://t.me/BotFather) and add its token as
+   the Replit Secret `TELEGRAM_BOT_TOKEN`.
+2. Add your API-Sports key as the Replit Secret `FOOTBALL_API_KEY` if you want
+   to use `/match` and `/coupon`.
 3. Run the bot with:
 
    ```bash

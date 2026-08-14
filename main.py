@@ -1,10 +1,16 @@
-import telebot, requests, json, ta
+import json
+import os
 from datetime import datetime
 
-# ========== COLLE TES CLES ICI ==========
-TOKEN = "8755889100 : AAFtWG5vnuj Rl -6rK4We KSD WudC_Lf1kYBs"
-FOOTBALL_KEY = "3744e5ea2a2017438f7c81ed63417b3d"
-# ========================================
+import requests
+import ta
+import telebot
+
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+FOOTBALL_KEY = os.getenv("FOOTBALL_API_KEY", "").strip()
+
+if not TOKEN:
+    raise RuntimeError("Missing TELEGRAM_BOT_TOKEN secret.")
 
 bot = telebot.TeleBot(TOKEN)
 DATA_FILE = "journal.json"
