@@ -1,10 +1,30 @@
 import json
 import os
+from threading import Thread
 from datetime import datetime
 
 import requests
 import ta
 import telebot
+from flask import Flask
+
+
+app = Flask("")
+
+
+@app.route("/")
+def home() -> str:
+    return "Bot N2 is alive!"
+
+
+def run() -> None:
+    port = int(os.getenv("KEEP_ALIVE_PORT", "5000"))
+    app.run(host="0.0.0.0", port=port)
+
+
+def keep_alive() -> None:
+    thread = Thread(target=run, daemon=True)
+    thread.start()
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 FOOTBALL_KEY = os.getenv("FOOTBALL_API_KEY", "").strip()
@@ -140,4 +160,5 @@ def journal(msg):
     total = sum(t["gain"] for t in data["trades"][-30:])
     bot.send_message(msg.chat.id, f"**Journal 30 jours:** {total} FCFA\nTrades: {len(data['trades'])}\n\n{WARN}", parse_mode="Markdown")
 
+keep_alive()
 bot.polling()

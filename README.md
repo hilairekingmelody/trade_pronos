@@ -16,6 +16,9 @@ an echo handler that you can replace with your own bot logic.
    python main.py
    ```
 
+The bot also starts a small Flask keep-alive endpoint at `/`. It uses port
+5000 by default; set `KEEP_ALIVE_PORT` if you need another available port.
+
 For local development, copy `.env.example` to `.env` and add the token there.
 `.env` is ignored by Git, so the token will not be committed.
 
