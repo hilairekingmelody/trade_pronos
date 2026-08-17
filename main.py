@@ -275,7 +275,47 @@ def journal(msg):
         f"📖 **Journal (30 derniers trades)**\nBénéfice/Perte cumulé : `{total:+.0f} FCFA`\nNombre de trades : `{len(data['trades'])}`{WARN}",
     )
 
+import os
+import requests
+from telebot import TeleBot
 
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+FOOTBALL_API_KEY = os.environ.get("API_FOOTBALL")
+
+bot = TeleBot(TOKEN)
+
+def obtenir_analyses_matchs():
+    # Exemple avec Football-Data.org (à adapter selon ton fournisseur d'API)
+    url = "https://api.football-data.org/v4/matches"
+    headers = {"X-Auth-Token": FOOTBALL_API_KEY}
+
+    try:
+        response = requests.get(url, headers=headers)
+        data = response.json()
+        matches = data.get("matches", [])[:3] # On prend les 3 premiers matchs
+
+        if not matches:
+            return "⚽ Aucun gros match au programme aujourd'hui."
+
+        message = "⚽ **ANALYSES DES 3 GROS MATCHS DU JOUR** ⚽\n\n"
+        for idx, match in enumerate(matches, 1):
+            equipe_dom = match['homeTeam']['name']
+            equipe_ext = match['awayTeam']['name']
+            competition = match['competition']['name']
+
+            message += f"**{idx}. {equipe_dom} vs {equipe_ext}** ({competition})\n"
+            message += f"📊 *Analyse :* Rencontre équilibrée. Avantage à domicile pour {equipe_dom}.\n"
+            message += f"💡 *Pronostic :* Plus de 1.5 buts / Victoire ou Nul {equipe_dom}\n\n"
+
+        return message
+    except Exception as e:
+        return "⚠️ Erreur lors de la récupération des données de l'API Football."
+
+@bot.message_handler(commands=['pari', 'paris'])
+def handle_paris(message):
+    bot.send_chat_action(message.chat.id, 'typing')
+    analyse = obtenir_analyses_matchs()
+    bot.reply_to(message, analyse, parse_mode="Markdown")
 # 5. DÉMARRAGE
 if __name__ == "__main__":
     keep_alive()
