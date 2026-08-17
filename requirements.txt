@@ -5,3 +5,9 @@ requests
 ta
 flask
 Flask
+Flask
+pytelebot
+pyTelegramBotAPI==4.29.1
+python-dotenv==1.1.1
+requests
+ta
