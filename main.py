@@ -10,7 +10,7 @@ import ta
 import telebot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-# 1. SERVEUR WEB (Keeping Alive)
+# 1. SERVEUR WEB (Keep Alive)
 app = Flask("")
 
 
@@ -187,20 +187,28 @@ def obtenir_analyses_matchs():
         return "⚠️ Erreur lors de la récupération des données de l'API Football."
 
 
-# 5. COMMANDES DE DIALOGUE & BOUTONS
-@bot.message_handler(commands=["start", "help", "cmds"])
+# 5. COMMANDES DE DIALOGUE
+@bot.message_handler(commands=["start"])
 def send_welcome(msg):
     text = (
-        "🤖 **MegaBot Trading & Sport v2.2**\n\n"
-        "Voici les commandes disponibles :\n\n"
-        "📈 **Trading**\n"
-        "• `/crypto` : Obtenir un signal en temps réel (interactif)\n"
-        "• `/backtest` : Tester la stratégie sur 500 bougies\n\n"
+        "👋 **Bienvenue sur TRADING & PRONOSTICS BOT !**\n\n"
+        "Cliquez sur la boîte de **Menu** en bas à gauche pour découvrir toutes les fonctionnalités !"
+    )
+    bot.reply_to(msg, text)
+
+
+@bot.message_handler(commands=["help", "cmds"])
+def send_help(msg):
+    text = (
+        "🤖 **MegaBot Trading & Sport v2.3**\n\n"
+        "Voici la liste complète des fonctionnalités disponibles :\n\n"
+        "📈 **Trading Crypto**\n"
+        "• `/crypto` : Obtenir un signal en temps réel (menu interactif)\n"
+        "• `/backtest` : Tester la stratégie technique sur 500 bougies\n\n"
         "⚽ **Football**\n"
-        "• `/pari` : Analyses des 3 gros matchs du jour\n"
-        "• `/match PSG vs Marseille` : Historique H2H\n\n"
-        "💰 **Gestion**\n"
-        "• `/bankroll` : Calculateur de mise sécurisée (2% d'exposition)\n"
+        "• `/pari` : Analyses et conseils sur les 3 gros matchs du jour\n\n"
+        "💰 **Gestion de Capital**\n"
+        "• `/bankroll` : Calculateur de mise sécurisée (exposition à 2%)\n"
         f"{WARN}"
     )
     bot.reply_to(msg, text)
@@ -284,37 +292,6 @@ def handle_paris(msg):
     bot.send_chat_action(msg.chat.id, 'typing')
     analyse = obtenir_analyses_matchs()
     bot.reply_to(msg, analyse, parse_mode="Markdown")
-
-
-@bot.message_handler(commands=["match"])
-def match(msg):
-    content = msg.text.replace("/match", "").strip()
-    if " vs " not in content:
-        return bot.reply_to(msg, "❌ Usage : `/match Real Madrid vs Barcelona`")
-
-    e1, e2 = [x.strip() for x in content.split(" vs ")]
-    headers = {"x-apisports-key": FOOTBALL_KEY}
-
-    try:
-        r1 = requests.get(f"https://v3.football.api-sports.io/teams?search={e1}", headers=headers, timeout=10).json()
-        r2 = requests.get(f"https://v3.football.api-sports.io/teams?search={e2}", headers=headers, timeout=10).json()
-
-        if not r1.get("response") or not r2.get("response"):
-            return bot.reply_to(msg, "❌ Équipe introuvable.")
-
-        id1 = r1["response"][0]["team"]["id"]
-        id2 = r2["response"][0]["team"]["id"]
-
-        h2h = requests.get(f"https://v3.football.api-sports.io/fixtures/headtohead?h2h={id1}-{id2}&last=5", headers=headers, timeout=10).json()
-
-        text = f"⚽ **{e1} vs {e2} (5 Derniers H2H)**\n\n"
-        for m in h2h.get("response", []):
-            text += f"• {m['teams']['home']['name']} `{m['goals']['home']}-{m['goals']['away']}` {m['teams']['away']['name']}\n"
-
-        text += WARN
-        bot.reply_to(msg, text)
-    except Exception:
-        bot.reply_to(msg, "❌ Erreur de recherche H2H.")
 
 
 # ÉCOUTEUR TEXTE (Interactions fluides sans commande)
