@@ -40,11 +40,10 @@ if not TOKEN:
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 WARN = "\n\n⚠️ *Attention :* Gestion de risque obligatoire. Interdit aux -18 ans."
 
-# Dictionnaires pour suivre les états de conversation des utilisateurs
 user_states = {}
 
 
-# 3. FONCTIONS D'ANALYSE CRYPTO EN TEMPS RÉEL (BINANCE API)
+# 3. TRADING (VERROUILLÉ)
 def analyser_crypto(pair):
     pair = pair.upper().replace("/", "").replace("-", "")
     url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval=1h&limit=100"
@@ -57,7 +56,6 @@ def analyser_crypto(pair):
         data = res.json()
         closes = pd.Series([float(c[4]) for c in data])
 
-        # Calcul des indicateurs techniques
         price = closes.iloc[-1]
         rsi = ta.momentum.RSIIndicator(closes, window=14).rsi().iloc[-1]
         macd_indicator = ta.trend.MACD(closes)
@@ -66,7 +64,6 @@ def analyser_crypto(pair):
         ema20 = ta.trend.EMAIndicator(closes, window=20).ema_indicator().iloc[-1]
         ema50 = ta.trend.EMAIndicator(closes, window=50).ema_indicator().iloc[-1]
 
-        # Logique de signal améliorée et multi-indicateurs
         score = 0
         if rsi < 35:
             score += 2
@@ -87,7 +84,6 @@ def analyser_crypto(pair):
         elif price < ema20 < ema50:
             score -= 2
 
-        # Détermination du signal final
         if score >= 3:
             signal = "🚀 **ACHAT FORT (BULLISH)**"
         elif score >= 1:
@@ -111,8 +107,8 @@ def analyser_crypto(pair):
             f"🎯 **Signal détecté :** {signal}"
             f"{WARN}"
         )
-    except Exception as e:
-        return f"❌ Erreur lors de la connexion au marché en temps réel."
+    except Exception:
+        return "❌ Erreur lors de la connexion au marché en temps réel."
 
 
 def executer_backtest(pair):
@@ -153,6 +149,7 @@ def executer_backtest(pair):
         return "❌ Erreur lors du calcul du backtest."
 
 
+# 4. FOOTBALL
 def obtenir_analyses_matchs():
     url = "https://api.football-data.org/v4/matches"
     headers = {"X-Auth-Token": FOOTBALL_KEY}
@@ -180,27 +177,25 @@ def obtenir_analyses_matchs():
         return "⚠️ Erreur lors de la récupération des données de l'API Football."
 
 
-# 4. COMMANDES ET INTERACTION UTILISATEUR
+# 5. COMMANDES DU BOT
 @bot.message_handler(commands=["start", "help", "cmds"])
 def send_welcome(msg):
     text = (
-        "🤖 **MegaBot Trading & Sport v2.1**\n\n"
+        "🤖 **MegaBot Trading & Sport v2.2**\n\n"
         "Voici les commandes disponibles :\n\n"
         "📈 **Trading**\n"
-        "• `/crypto` : Obtenir un signal en temps réel (choix interactif)\n"
+        "• `/crypto` : Obtenir un signal en temps réel (interactif)\n"
         "• `/backtest` : Tester la stratégie sur n'importe quel actif\n\n"
         "⚽ **Football**\n"
         "• `/pari` : Analyses des 3 gros matchs du jour\n"
-        "• `/match PSG vs Marseille` : Historique H2H\n"
-        "• `/coupon` : Matchs Premier League du jour\n\n"
+        "• `/match PSG vs Marseille` : Historique H2H\n\n"
         "💰 **Gestion**\n"
-        "• `/bankroll 100000 2%` : Calcul de mise sécurisée\n"
+        "• `/bankroll` : Calculateur de mise sécurisée (2% d'exposition)\n"
         f"{WARN}"
     )
     bot.reply_to(msg, text)
 
 
-# Menu interactif pour /crypto
 @bot.message_handler(commands=["crypto"])
 def command_crypto(msg):
     markup = InlineKeyboardMarkup(row_width=2)
@@ -215,12 +210,11 @@ def command_crypto(msg):
     bot.reply_to(
         msg,
         "📈 **ANALYSE CRYPTO EN TEMPS RÉEL**\n\n"
-        "Sélectionne une paire ci-dessous ou clique sur *Autre symbole* pour en entrer une manuellement :",
+        "Sélectionne une paire ci-dessous ou clique sur *Autre symbole* :",
         reply_markup=markup
     )
 
 
-# Menu interactif pour /backtest
 @bot.message_handler(commands=["backtest"])
 def command_backtest(msg):
     markup = InlineKeyboardMarkup(row_width=2)
@@ -238,7 +232,16 @@ def command_backtest(msg):
     )
 
 
-# Gestion des clics sur les boutons
+@bot.message_handler(commands=["bankroll"])
+def bankroll_start(msg):
+    user_states[msg.chat.id] = "WAITING_BANKROLL"
+    bot.reply_to(
+        msg,
+        "💰 **GESTION DE CAPITAL (Règle des 2%)**\n\n"
+        "Entrez le montant de votre capital total (ex: `100000` ou `5000`) :"
+    )
+
+
 @bot.callback_query_handler(func=lambda call: True)
 def handle_query(call):
     chat_id = call.message.chat.id
@@ -247,7 +250,7 @@ def handle_query(call):
         pair = call.data.replace("c_", "")
         if pair == "custom":
             user_states[chat_id] = "WAITING_CRYPTO_PAIR"
-            bot.send_message(chat_id, "🔍 Tape le nom de la paire à analyser (ex: `PEPEUSDT`, `ADAUSDT`, `AVAXUSDT`) :")
+            bot.send_message(chat_id, "🔍 Tape le nom de la paire à analyser (ex: `PEPEUSDT`, `ADAUSDT`) :")
         else:
             bot.answer_callback_query(call.id, "Analyse du marché en cours...")
             bot.send_chat_action(chat_id, "typing")
@@ -264,25 +267,6 @@ def handle_query(call):
             bot.send_chat_action(chat_id, "typing")
             res = executer_backtest(pair)
             bot.send_message(chat_id, res)
-
-
-# Écouteur de messages texte pour les symboles personnalisés
-@bot.message_handler(func=lambda msg: True)
-def handle_text_messages(msg):
-    chat_id = msg.chat.id
-    state = user_states.get(chat_id)
-
-    if state == "WAITING_CRYPTO_PAIR":
-        user_states[chat_id] = None
-        bot.send_chat_action(chat_id, "typing")
-        res = analyser_crypto(msg.text.strip())
-        bot.send_message(chat_id, res)
-
-    elif state == "WAITING_BACKTEST_PAIR":
-        user_states[chat_id] = None
-        bot.send_chat_action(chat_id, "typing")
-        res = executer_backtest(msg.text.strip())
-        bot.send_message(chat_id, res)
 
 
 @bot.message_handler(commands=['pari', 'paris'])
@@ -323,49 +307,43 @@ def match(msg):
         bot.reply_to(msg, "❌ Erreur de recherche H2H.")
 
 
-@bot.message_handler(commands=["coupon"])
-def coupon(msg):
-    headers = {"x-apisports-key": FOOTBALL_KEY}
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    url = f"https://v3.football.api-sports.io/fixtures?league=39&season=2026&date={date_str}"
+# ÉCOUTEUR TEXTE (Interactions fluides sans commande)
+@bot.message_handler(func=lambda msg: not msg.text.startswith('/'))
+def handle_text_messages(msg):
+    chat_id = msg.chat.id
+    state = user_states.get(chat_id)
 
-    try:
-        res = requests.get(url, headers=headers, timeout=10).json()
-        matches = res.get("response", [])
+    if state == "WAITING_BANKROLL":
+        user_states[chat_id] = None
+        cleaned_text = msg.text.replace(" ", "").replace(",", ".").strip()
+        try:
+            capital = float(cleaned_text)
+            mise = capital * 0.02
+            res = (
+                f"💼 **CALCUL DE RISQUE (2% STRICT)**\n\n"
+                f"💵 **Capital indiqué :** `{capital:,.2f}`\n"
+                f"📊 **Risque autorisé :** `2%`\n"
+                f"🎯 **Mise maximale recommandée :** `{mise:,.2f}`"
+                f"{WARN}"
+            )
+            bot.send_message(chat_id, res)
+        except ValueError:
+            bot.send_message(chat_id, "❌ Veuillez entrer un nombre valide (ex: `100000`). Tapez `/bankroll` pour recommencer.")
 
-        if not matches:
-            return bot.reply_to(msg, f"ℹ️ Aucun match de Premier League aujourd'hui ({date_str}).")
+    elif state == "WAITING_CRYPTO_PAIR":
+        user_states[chat_id] = None
+        bot.send_chat_action(chat_id, "typing")
+        res = analyser_crypto(msg.text.strip())
+        bot.send_message(chat_id, res)
 
-        text = f"⚽ **Premier League ({date_str})**\n\n"
-        for m in matches[:5]:
-            text += f"• {m['teams']['home']['name']} vs {m['teams']['away']['name']}\n"
-
-        text += WARN
-        bot.reply_to(msg, text)
-    except Exception:
-        bot.reply_to(msg, "❌ Erreur lors du chargement des matchs.")
-
-
-@bot.message_handler(commands=["bankroll"])
-def bankroll(msg):
-    try:
-        parts = msg.text.split()
-        capital = float(parts[1])
-        risk = float(parts[2].replace("%", ""))
-
-        if risk > 5:
-            return bot.reply_to(msg, "⚠️ Risque trop élevé (>5%). Protégez votre capital !")
-
-        mise = capital * (risk / 100)
-        bot.reply_to(
-            msg,
-            f"💼 **Gestion de Risque**\nCapital : `{capital:,.0f} FCFA`\nRisque : `{risk}%`\n👉 **Mise conseillée : `{mise:,.0f} FCFA`**",
-        )
-    except Exception:
-        bot.reply_to(msg, "❌ Usage : `/bankroll 100000 2%`")
+    elif state == "WAITING_BACKTEST_PAIR":
+        user_states[chat_id] = None
+        bot.send_chat_action(chat_id, "typing")
+        res = executer_backtest(msg.text.strip())
+        bot.send_message(chat_id, res)
 
 
-# 5. DÉMARRAGE DU BOT
+# 6. DÉMARRAGE DU BOT
 if __name__ == "__main__":
     keep_alive()
     print("🤖 Bot démarré avec succès !")
