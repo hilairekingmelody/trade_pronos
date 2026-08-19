@@ -10,7 +10,7 @@ import ta
 import telebot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-# 1. SERVEUR WEB
+# 1. SERVEUR WEB (Keeping Alive)
 app = Flask("")
 
 
@@ -43,15 +43,20 @@ WARN = "\n\n⚠️ *Attention :* Gestion de risque obligatoire. Interdit aux -18
 user_states = {}
 
 
-# 3. TRADING (VERROUILLÉ)
+# 3. TRADING & INDICATEURS
 def analyser_crypto(pair):
     pair = pair.upper().replace("/", "").replace("-", "")
     url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval=1h&limit=100"
 
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+        "Accept": "application/json"
+    }
+
     try:
-        res = requests.get(url, timeout=10)
+        res = requests.get(url, headers=headers, timeout=10)
         if res.status_code != 200:
-            return f"❌ La paire `{pair}` est introuvable sur le marché Binance."
+            return f"❌ Paire `{pair}` introuvable ou erreur réseau (Code : `{res.status_code}`)."
 
         data = res.json()
         closes = pd.Series([float(c[4]) for c in data])
@@ -108,17 +113,22 @@ def analyser_crypto(pair):
             f"{WARN}"
         )
     except Exception:
-        return "❌ Erreur lors de la connexion au marché en temps réel."
+        return "❌ Erreur lors de la connexion au marché Binance."
 
 
 def executer_backtest(pair):
     pair = pair.upper().replace("/", "").replace("-", "")
     url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval=1h&limit=500"
 
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+        "Accept": "application/json"
+    }
+
     try:
-        res = requests.get(url, timeout=10)
+        res = requests.get(url, headers=headers, timeout=10)
         if res.status_code != 200:
-            return f"❌ Paire `{pair}` introuvable pour le backtest."
+            return f"❌ Erreur réseau Binance (Code : `{res.status_code}`). Impossible de récupérer `{pair}`."
 
         data = res.json()
         closes = pd.Series([float(c[4]) for c in data])
@@ -146,7 +156,7 @@ def executer_backtest(pair):
             f"{WARN}"
         )
     except Exception:
-        return "❌ Erreur lors du calcul du backtest."
+        return "❌ Erreur de calcul lors du backtest."
 
 
 # 4. FOOTBALL
@@ -177,7 +187,7 @@ def obtenir_analyses_matchs():
         return "⚠️ Erreur lors de la récupération des données de l'API Football."
 
 
-# 5. COMMANDES DU BOT
+# 5. COMMANDES DE DIALOGUE & BOUTONS
 @bot.message_handler(commands=["start", "help", "cmds"])
 def send_welcome(msg):
     text = (
@@ -185,7 +195,7 @@ def send_welcome(msg):
         "Voici les commandes disponibles :\n\n"
         "📈 **Trading**\n"
         "• `/crypto` : Obtenir un signal en temps réel (interactif)\n"
-        "• `/backtest` : Tester la stratégie sur n'importe quel actif\n\n"
+        "• `/backtest` : Tester la stratégie sur 500 bougies\n\n"
         "⚽ **Football**\n"
         "• `/pari` : Analyses des 3 gros matchs du jour\n"
         "• `/match PSG vs Marseille` : Historique H2H\n\n"
