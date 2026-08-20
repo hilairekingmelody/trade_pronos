@@ -10,7 +10,12 @@ import pandas as pd
 import requests
 import ta
 import telebot
-from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
+from telebot.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    LabeledPrice,
+    PreCheckoutQuery,
+)
 
 # ---------------------------------------------------------
 # 1. SERVEUR WEB (Keep Alive Render)
@@ -35,10 +40,11 @@ def keep_alive():
 
 
 # ---------------------------------------------------------
-# 2. CONFIGURATION & SECRETS
+# 2. CONFIGURATION, SECRETS & MONÉTISATION
 # ---------------------------------------------------------
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip().replace('"', "").replace("'", "")
 FOOTBALL_KEY = os.environ.get("FOOTBALL_API_KEY", "").strip() or os.environ.get("API_FOOTBALL", "").strip()
+PROVIDER_TOKEN = os.environ.get("PAYMENT_PROVIDER_TOKEN", "").strip()  # Token Stripe ou vide pour Telegram Stars
 
 ADMIN_ID_RAW = os.environ.get("ADMIN_ID", "0").strip()
 ADMIN_ID = int(ADMIN_ID_RAW) if ADMIN_ID_RAW.isdigit() else 0
@@ -52,10 +58,11 @@ WARN = "\n\n⚠️ *Attention :* Gestion de risque obligatoire. Interdit aux -18
 user_states = {}
 user_last_request_time = {}
 ANTI_SPAM_DELAY = 3.0
+DAILY_LIMIT_FREE = 5  # Limite de requêtes par jour pour les utilisateurs GRATUITS
 
 
 # ---------------------------------------------------------
-# 3. BASE DE DONNÉES SQLITE (Étape 5 & 6)
+# 3. BASE DE DONNÉES SQLITE (Gestion Utilisateurs & Quotas)
 # ---------------------------------------------------------
 DB_FILE = "users.db"
 
@@ -75,7 +82,11 @@ def init_db():
     conn.close()
 
 
-def get_or_create_user(user_id):
+def check_and_update_quota(user_id):
+    """Vérifie si l'utilisateur a dépassé son quota quotidien."""
+    if user_id == ADMIN_ID:
+        return True, "ADMIN"
+
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT status, daily_requests, last_request_date FROM users WHERE user_id = ?", (user_id,))
@@ -85,22 +96,48 @@ def get_or_create_user(user_id):
 
     if not row:
         cursor.execute(
-            "INSERT INTO users (user_id, status, daily_requests, last_request_date) VALUES (?, 'FREE', 0, ?)",
+            "INSERT INTO users (user_id, status, daily_requests, last_request_date) VALUES (?, 'FREE', 1, ?)",
             (user_id, today_str),
         )
         conn.commit()
         conn.close()
-        return "FREE", 0, today_str
+        return True, "FREE (1/5)"
 
+    status, requests_count, last_date = row[0], row[1], row[2]
+
+    # Si c'est un membre VIP / PREMIUM -> Accès illimité
+    if status in ["PREMIUM", "VIP"]:
+        conn.close()
+        return True, status
+
+    # Remise à zéro si nouvelle journée
+    if last_date != today_str:
+        cursor.execute(
+            "UPDATE users SET daily_requests = 1, last_request_date = ? WHERE user_id = ?",
+            (today_str, user_id),
+        )
+        conn.commit()
+        conn.close()
+        return True, f"FREE (1/{DAILY_LIMIT_FREE})"
+
+    # Vérification du quota journalier
+    if requests_count >= DAILY_LIMIT_FREE:
+        conn.close()
+        return False, status
+
+    # Incrémentation du compteur
+    new_count = requests_count + 1
+    cursor.execute("UPDATE users SET daily_requests = ? WHERE user_id = ?", (new_count, user_id))
+    conn.commit()
     conn.close()
-    return row[0], row[1], row[2]
+    return True, f"FREE ({new_count}/{DAILY_LIMIT_FREE})"
 
 
 init_db()
 
 
 # ---------------------------------------------------------
-# 4. FONCTIONS DE SÉCURITÉ & VALIDATION (Étapes 1, 3, 4, 7)
+# 4. SÉCURITÉ & VALIDATIONS
 # ---------------------------------------------------------
 def check_rate_limit(user_id):
     now = time.time()
@@ -287,27 +324,46 @@ def obtenir_analyses_matchs():
 
 
 # ---------------------------------------------------------
-# 7. COMMANDES TELEGRAM & ADMIN (Étape 6)
+# 7. COMMANDES TELEGRAM, VIP & ACHATS
 # ---------------------------------------------------------
 @bot.message_handler(commands=["start"])
 def send_welcome(msg):
-    get_or_create_user(msg.from_user.id)
+    check_and_update_quota(msg.from_user.id)
     text = (
         "👋 **Bienvenue sur TRADING & PRONOSTICS BOT !**\n\n"
-        "Utilisez le menu ci-dessous pour lancer vos analyses en toute sécurité."
+        "👑 **Membre Gratuit :** 5 analyses offertes par jour.\n"
+        "⭐ **Pass VIP :** Analyses illimitées 24/7 ! Type `/vip` pour vous abonner."
     )
     bot.reply_to(msg, text)
+
+
+@bot.message_handler(commands=["vip", "premium", "buy"])
+def command_vip(msg):
+    markup = InlineKeyboardMarkup()
+    btn_stars = InlineKeyboardButton("⭐ S'abonner VIP (250 Stars Telegram)", callback_data="buy_vip_stars")
+    markup.add(btn_stars)
+
+    txt = (
+        "👑 **DEVENEZ MEMBRE VIP / PREMIUM**\n\n"
+        "Débloquez la puissance maximale du bot :\n"
+        "✅ **Analyses Crypto ILLIMITÉES**\n"
+        "✅ **Backtests ILLIMITÉS**\n"
+        "✅ **Pronostics Football Quotidiens**\n"
+        "✅ **Priorité absolue lors des requêtes**\n\n"
+        "Cliquez ci-dessous pour débloquer votre accès VIP immédiatement :"
+    )
+    bot.reply_to(msg, txt, reply_markup=markup)
 
 
 @bot.message_handler(commands=["help", "cmds"])
 def send_help(msg):
     text = (
-        "🤖 **MegaBot Trading & Sport v2.3**\n\n"
-        "Voici les fonctionnalités disponibles :\n\n"
-        "📈 `/crypto` : Analyses & signaux en temps réel\n"
-        "📉 `/backtest` : Simulation de stratégie sur 500 bougies\n"
+        "🤖 **MegaBot Trading & Sport v3.0 (Monétisé)**\n\n"
+        "📈 `/crypto` : Analyses crypto en temps réel\n"
+        "📉 `/backtest` : Simulation stratégie 500 bougies\n"
         "⚽ `/pari` : Pronostics football du jour\n"
         "💰 `/bankroll` : Gestion de capital (2%)\n"
+        "👑 `/vip` : Passer au statut Premium Illimité\n"
         f"{WARN}"
     )
     bot.reply_to(msg, text)
@@ -321,15 +377,17 @@ def cmd_admin(msg):
 
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM users")
-    total_users = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*), SUM(CASE WHEN status='PREMIUM' THEN 1 ELSE 0 END) FROM users")
+    row = cursor.fetchone()
+    total_users, premium_users = row[0], row[1] or 0
     conn.close()
 
     txt = (
-        "⚙️ **PANNEAU D'ADMINISTRATION**\n\n"
+        "⚙️ **PANNEAU D'ADMINISTRATION & DE MONÉTISATION**\n\n"
         f"🆔 **ID Admin :** `{ADMIN_ID}`\n"
-        f"👥 **Utilisateurs enregistrés :** `{total_users}`\n\n"
-        "💡 *Commande d'attribution Premium :*\n"
+        f"👥 **Utilisateurs Totaux :** `{total_users}`\n"
+        f"⭐ **Membres VIP / Premium :** `{premium_users}`\n\n"
+        "💡 *Accorder le VIP manuellement :*\n"
         "`/grant_premium <user_id>`"
     )
     bot.reply_to(msg, txt)
@@ -355,10 +413,20 @@ def cmd_grant_premium(msg):
     bot.reply_to(msg, f"✅ L'utilisateur `{target_id}` est maintenant **PREMIUM** !")
 
 
+# ---------------------------------------------------------
+# 8. SERVICES AVEC CONTRÔLE STRICT DES QUOTAS
+# ---------------------------------------------------------
 @bot.message_handler(commands=["crypto"])
 def command_crypto(msg):
     if not check_rate_limit(msg.from_user.id):
         return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
+
+    allowed, quota_info = check_and_update_quota(msg.from_user.id)
+    if not allowed:
+        return bot.reply_to(
+            msg,
+            "❌ **Quota Quotidien Atteint !**\n\nVous avez consommé vos 5 requêtes gratuites du jour.\n👉 Tapez `/vip` pour débloquer l'accès **ILLIMITÉ** !"
+        )
 
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
@@ -370,13 +438,20 @@ def command_crypto(msg):
         InlineKeyboardButton("✍️ Autre symbole...", callback_data="c_custom")
     )
 
-    bot.reply_to(msg, "📈 **ANALYSE CRYPTO EN TEMPS RÉEL**\n\nSélectionnez une paire :", reply_markup=markup)
+    bot.reply_to(msg, f"📈 **ANALYSE CRYPTO (Quota : {quota_info})**\n\nSélectionnez une paire :", reply_markup=markup)
 
 
 @bot.message_handler(commands=["backtest"])
 def command_backtest(msg):
     if not check_rate_limit(msg.from_user.id):
         return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
+
+    allowed, quota_info = check_and_update_quota(msg.from_user.id)
+    if not allowed:
+        return bot.reply_to(
+            msg,
+            "❌ **Quota Quotidien Atteint !**\n\nVous avez consommé vos 5 requêtes gratuites du jour.\n👉 Tapez `/vip` pour débloquer l'accès **ILLIMITÉ** !"
+        )
 
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
@@ -386,7 +461,23 @@ def command_backtest(msg):
         InlineKeyboardButton("✍️ Autre symbole...", callback_data="bt_custom")
     )
 
-    bot.reply_to(msg, "📉 **BACKTEST STRATÉGIE**\n\nSélectionnez une paire :", reply_markup=markup)
+    bot.reply_to(msg, f"📉 **BACKTEST STRATÉGIE (Quota : {quota_info})**\n\nSélectionnez une paire :", reply_markup=markup)
+
+
+@bot.message_handler(commands=['pari', 'paris'])
+def handle_paris(msg):
+    if not check_rate_limit(msg.from_user.id):
+        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
+
+    allowed, quota_info = check_and_update_quota(msg.from_user.id)
+    if not allowed:
+        return bot.reply_to(
+            msg,
+            "❌ **Quota Quotidien Atteint !**\n\nVous avez consommé vos 5 requêtes gratuites du jour.\n👉 Tapez `/vip` pour débloquer l'accès **ILLIMITÉ** !"
+        )
+
+    bot.send_chat_action(msg.chat.id, 'typing')
+    bot.reply_to(msg, obtenir_analyses_matchs())
 
 
 @bot.message_handler(commands=["bankroll"])
@@ -398,17 +489,45 @@ def bankroll_start(msg):
     bot.reply_to(msg, "💰 **GESTION DE CAPITAL (2%)**\n\nEntrez votre capital total (ex: `5000`) :")
 
 
-@bot.message_handler(commands=['pari', 'paris'])
-def handle_paris(msg):
-    if not check_rate_limit(msg.from_user.id):
-        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
+# ---------------------------------------------------------
+# 9. PAIEMENTS TELEGRAM STARS / PROCESSEUR
+# ---------------------------------------------------------
+@bot.callback_query_handler(func=lambda call: call.data == "buy_vip_stars")
+def process_buy_stars(call):
+    bot.send_invoice(
+        call.message.chat.id,
+        title="Pass VIP Illimité",
+        description="Accès illimité aux signaux Trading Crypto, Backtests et Pronostics Sportifs 24/7.",
+        invoice_payload="vip_subscription_payload",
+        provider_token="",  # Vide pour Telegram Stars
+        currency="XTR",     # Devise officielle Telegram Stars
+        prices=[LabeledPrice("Abonnement VIP", 250)]
+    )
 
-    bot.send_chat_action(msg.chat.id, 'typing')
-    bot.reply_to(msg, obtenir_analyses_matchs())
+
+@bot.pre_checkout_query_handler(func=lambda query: True)
+def process_pre_checkout(query: PreCheckoutQuery):
+    bot.answer_pre_checkout_query(query.id, ok=True)
+
+
+@bot.message_handler(content_types=['successful_payment'])
+def process_successful_payment(msg):
+    user_id = msg.from_user.id
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET status = 'PREMIUM' WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+    bot.reply_to(
+        msg,
+        "🎉 **FÉLICITATIONS ET BIENVENUE VIP !** 🎉\n\n"
+        "Votre paiement a été validé avec succès. Vous bénéficiez désormais de l'accès **ILLIMITÉ** !"
+    )
 
 
 # ---------------------------------------------------------
-# 8. GESTION DES CALLBACKS ET DU TEXTE LIBRE
+# 10. GESTION DES CALLBACKS ET TEXTE LIBRE
 # ---------------------------------------------------------
 @bot.callback_query_handler(func=lambda call: True)
 def handle_query(call):
@@ -454,7 +573,7 @@ def handle_text_messages(msg):
         try:
             capital = float(cleaned_text)
             if capital <= 0:
-                bot.send_message(chat_id, "❌ Le capital doit être supérieur à zero.")
+                bot.send_message(chat_id, "❌ Le capital doit être supérieur à zéro.")
                 return
 
             mise = capital * 0.02
@@ -482,9 +601,9 @@ def handle_text_messages(msg):
 
 
 # ---------------------------------------------------------
-# 9. DÉMARRAGE
+# 11. DÉMARRAGE DU BOT
 # ---------------------------------------------------------
 if __name__ == "__main__":
     keep_alive()
-    print("🤖 Bot sécurisé prêt !")
+    print("🤖 Bot Monétisé prêt !")
     bot.infinity_polling(none_stop=True)
