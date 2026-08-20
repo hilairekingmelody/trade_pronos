@@ -1,35 +1,76 @@
 import os
-import requests
+import time
+from datetime import datetime
+from threading import Thread
+
+from flask import Flask
 import pandas as pd
+import requests
 import ta
-from telebot import TeleBot, types
+import telebot
+from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 # ---------------------------------------------------------
-# 1. INITIALISATION & SECRETS (Étape 2)
+# 1. SERVEUR WEB (Keep Alive pour Render)
 # ---------------------------------------------------------
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+app = Flask("")
+
+
+@app.route("/")
+def home():
+    return "Bot Telegram est EN LIGNE !", 200
+
+
+def run_flask():
+    port = int(os.environ.get("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port)
+
+
+def keep_alive():
+    t = Thread(target=run_flask)
+    t.daemon = True
+    t.start()
+
+
+# ---------------------------------------------------------
+# 2. CONFIGURATION, SECRETS ET ANTI-SPAM (Étape 2)
+# ---------------------------------------------------------
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip().replace('"', "").replace("'", "")
+FOOTBALL_KEY = os.environ.get("FOOTBALL_API_KEY", "").strip() or os.environ.get("API_FOOTBALL", "").strip()
+
 ADMIN_ID_RAW = os.environ.get("ADMIN_ID", "0").strip()
 ADMIN_ID = int(ADMIN_ID_RAW) if ADMIN_ID_RAW.isdigit() else 0
 
 if not TOKEN:
-    raise ValueError("❌ ERREUR: La variable TELEGRAM_BOT_TOKEN n'est pas configurée.")
+    raise ValueError("❌ ERREUR: La variable TELEGRAM_BOT_TOKEN est introuvable !")
 
-bot = TeleBot(TOKEN)
+bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
+WARN = "\n\n⚠️ *Attention :* Gestion de risque obligatoire. Interdit aux -18 ans."
 
-# Avertissement légal réutilisable
-WARN = "\n\n⚠️ *Gestion de risque obligatoire. Interdit aux -18 ans.*"
+user_states = {}
+
+# Protection Anti-Spam
+user_last_request_time = {}
+ANTI_SPAM_DELAY = 3.0
+
+
+def check_rate_limit(user_id):
+    now = time.time()
+    last_time = user_last_request_time.get(user_id, 0)
+    if now - last_time < ANTI_SPAM_DELAY:
+        return False
+    user_last_request_time[user_id] = now
+    return True
 
 
 def is_admin(user_id):
-    """Vérifie si l'utilisateur est l'administrateur configuré."""
     return user_id == ADMIN_ID
 
 
 # ---------------------------------------------------------
-# 2. FIX DÉFINITIF BINANCE (Contournement HTTP 451)
+# 3. FIX BINANCE & INDICATEURS CRYPTO
 # ---------------------------------------------------------
 def requete_binance_securisee(url_path):
-    """Essaye plusieurs serveurs miroirs officiels pour contourner le blocage HTTP 451."""
     domaines = [
         "https://api1.binance.com",
         "https://api2.binance.com",
@@ -154,120 +195,225 @@ def executer_backtest(pair):
 
 
 # ---------------------------------------------------------
-# 3. GESTION DU CLAVIER & DES COMMANDES TELEGRAM
+# 4. FOOTBALL
 # ---------------------------------------------------------
-def get_main_keyboard():
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_btc = types.InlineKeyboardButton("🟡 BTC/USDT", callback_data="crypto_BTCUSDT")
-    btn_eth = types.InlineKeyboardButton("🔹 ETH/USDT", callback_data="crypto_ETHUSDT")
-    btn_sol = types.InlineKeyboardButton("🔆 SOL/USDT", callback_data="crypto_SOLUSDT")
-    btn_bnb = types.InlineKeyboardButton("🔸 BNB/USDT", callback_data="crypto_BNBUSDT")
-    btn_xrp = types.InlineKeyboardButton("🌐 XRP/USDT", callback_data="crypto_XRPUSDT")
-    btn_custom = types.InlineKeyboardButton("✍️ Autre symbole...", callback_data="crypto_CUSTOM")
+def obtenir_analyses_matchs():
+    url = "https://api.football-data.org/v4/matches"
+    headers = {"X-Auth-Token": FOOTBALL_KEY}
 
-    markup.add(btn_btc, btn_eth, btn_sol, btn_bnb, btn_xrp, btn_custom)
-    return markup
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        data = response.json()
+        matches = data.get("matches", [])[:3]
+
+        if not matches:
+            return "⚽ Aucun gros match au programme aujourd'hui."
+
+        message = "⚽ **ANALYSES DES 3 GROS MATCHS DU JOUR** ⚽\n\n"
+        for idx, match in enumerate(matches, 1):
+            equipe_dom = match['homeTeam']['name']
+            equipe_ext = match['awayTeam']['name']
+            competition = match['competition']['name']
+
+            message += f"**{idx}. {equipe_dom} vs {equipe_ext}** ({competition})\n"
+            message += f"📊 *Analyse :* Rencontre équilibrée. Avantage à domicile pour {equipe_dom}.\n"
+            message += f"💡 *Pronostic :* Plus de 1.5 buts / Victoire ou Nul {equipe_dom}\n\n"
+
+        return message
+    except Exception:
+        return "⚠️ Erreur lors de la récupération des données de l'API Football."
 
 
-@bot.message_handler(commands=['start', 'help'])
-def send_welcome(message):
-    txt = (
-        "👋 **Bienvenue sur TRADING & PRONO BOT !**\n\n"
-        "Voici les commandes disponibles :\n"
-        "📈 `/crypto` : Analyses & signaux sur les cryptomonnaies.\n"
-        "💰 `/bankroll` : Calculateur de mise sécurisée.\n"
-        "🔒 `/admin` : Espace d'administration réservé.\n"
+# ---------------------------------------------------------
+# 5. COMMANDES DE DIALOGUE & ADMINISTRATION
+# ---------------------------------------------------------
+@bot.message_handler(commands=["start"])
+def send_welcome(msg):
+    text = (
+        "👋 **Bienvenue sur TRADING & PRONOSTICS BOT !**\n\n"
+        "Cliquez sur la boîte de **Menu** en bas à gauche pour découvrir toutes les fonctionnalités !"
+    )
+    bot.reply_to(msg, text)
+
+
+@bot.message_handler(commands=["help", "cmds"])
+def send_help(msg):
+    text = (
+        "🤖 **MegaBot Trading & Sport v2.3**\n\n"
+        "Voici la liste complète des fonctionnalités disponibles :\n\n"
+        "📈 **Trading Crypto**\n"
+        "• `/crypto` : Obtenir un signal en temps réel (menu interactif)\n"
+        "• `/backtest` : Tester la stratégie technique sur 500 bougies\n\n"
+        "⚽ **Football**\n"
+        "• `/pari` : Analyses et conseils sur les 3 gros matchs du jour\n\n"
+        "💰 **Gestion de Capital**\n"
+        "• `/bankroll` : Calculateur de mise sécurisée (exposition à 2%)\n"
         f"{WARN}"
     )
-    bot.reply_to(message, txt, parse_mode="Markdown")
+    bot.reply_to(msg, text)
 
 
-@bot.message_handler(commands=['crypto'])
-def cmd_crypto(message):
-    bot.send_message(
-        message.chat.id,
-        "📈 **ANALYSE CRYPTO EN TEMPS RÉEL**\n\nSélectionne une paire ci-dessous ou clique sur **Autre symbole** :",
-        reply_markup=get_main_keyboard(),
-        parse_mode="Markdown"
-    )
-
-
-@bot.message_handler(commands=['bankroll'])
-def cmd_bankroll(message):
-    txt = (
-        "💰 **GESTION DE CAPITAL (BANKROLL)**\n\n"
-        "Pour calculer votre mise avec une exposition recommandée de **2%** :\n"
-        "Tapez : `/bankroll <votre_capital>`\n\n"
-        "Example : `/bankroll 1000`"
-        f"{WARN}"
-    )
-
-    parts = message.text.split()
-    if len(parts) > 1:
-        try:
-            capital = float(parts[1])
-            mise = capital * 0.02
-            res = (
-                f"🧮 **RÉSULTAT DU CALCUL**\n\n"
-                f"💵 **Capital total :** `{capital:,.2f} $`\n"
-                f"🛡️ **Mise recommandée (2%) :** `{mise:,.2f} $`"
-                f"{WARN}"
-            )
-            bot.reply_to(message, res, parse_mode="Markdown")
-            return
-        except ValueError:
-            bot.reply_to(message, "❌ Veuillez entrer un montant numérique valide.")
-            return
-
-    bot.reply_to(message, txt, parse_mode="Markdown")
-
-
-# ---------------------------------------------------------
-# 4. ESPACE ADMINISTRATEUR SÉCURISÉ (Étape 2)
-# ---------------------------------------------------------
-@bot.message_handler(commands=['admin'])
-def cmd_admin(message):
-    if not is_admin(message.from_user.id):
-        bot.reply_to(message, "⛔ **Accès refusé.** Cette commande est réservée à l'administrateur.")
+@bot.message_handler(commands=["admin"])
+def cmd_admin(msg):
+    if not is_admin(msg.from_user.id):
+        bot.reply_to(msg, "⛔ **Accès refusé.** Vous n'êtes pas l'administrateur.")
         return
 
     txt = (
         "⚙️ **ESPACE ADMINISTRATION**\n\n"
-        " Statut : **Connecté en tant qu'administrateur**\n"
-        "ID Admin : `{}`\n\n"
-        "Vous disposez des droits complets sur le bot.".format(ADMIN_ID)
+        "🔑 Status : **Connecté Administrateur**\n"
+        f"🆔 Votre Admin ID : `{ADMIN_ID}`\n\n"
+        "Vous disposez du contrôle total sur le bot."
     )
-    bot.reply_to(message, txt, parse_mode="Markdown")
+    bot.reply_to(msg, txt)
+
+
+@bot.message_handler(commands=["crypto"])
+def command_crypto(msg):
+    if not check_rate_limit(msg.from_user.id):
+        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes entre deux requêtes.")
+
+    markup = InlineKeyboardMarkup(row_width=2)
+    b1 = InlineKeyboardButton("🟡 BTC/USDT", callback_data="c_BTCUSDT")
+    b2 = InlineKeyboardButton("🔹 ETH/USDT", callback_data="c_ETHUSDT")
+    b3 = InlineKeyboardButton("☀️ SOL/USDT", callback_data="c_SOLUSDT")
+    b4 = InlineKeyboardButton("🔶 BNB/USDT", callback_data="c_BNBUSDT")
+    b5 = InlineKeyboardButton("🌐 XRP/USDT", callback_data="c_XRPUSDT")
+    b6 = InlineKeyboardButton("✍️ Autre symbole...", callback_data="c_custom")
+    markup.add(b1, b2, b3, b4, b5, b6)
+
+    bot.reply_to(
+        msg,
+        "📈 **ANALYSE CRYPTO EN TEMPS RÉEL**\n\nSélectionne une paire ci-dessous ou clique sur *Autre symbole* :",
+        reply_markup=markup
+    )
+
+
+@bot.message_handler(commands=["backtest"])
+def command_backtest(msg):
+    if not check_rate_limit(msg.from_user.id):
+        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes entre deux requêtes.")
+
+    markup = InlineKeyboardMarkup(row_width=2)
+    b1 = InlineKeyboardButton("🟡 BTC/USDT", callback_data="bt_BTCUSDT")
+    b2 = InlineKeyboardButton("🔹 ETH/USDT", callback_data="bt_ETHUSDT")
+    b3 = InlineKeyboardButton("☀️ SOL/USDT", callback_data="bt_SOLUSDT")
+    b4 = InlineKeyboardButton("✍️ Autre symbole...", callback_data="bt_custom")
+    markup.add(b1, b2, b3, b4)
+
+    bot.reply_to(
+        msg,
+        "📉 **BACKTEST STRATÉGIE**\n\nSélectionne une paire pour lancer la simulation sur 500 bougies :",
+        reply_markup=markup
+    )
+
+
+@bot.message_handler(commands=["bankroll"])
+def bankroll_start(msg):
+    if not check_rate_limit(msg.from_user.id):
+        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes entre deux requêtes.")
+
+    user_states[msg.chat.id] = "WAITING_BANKROLL"
+    bot.reply_to(
+        msg,
+        "💰 **GESTION DE CAPITAL (Règle des 2%)**\n\nEntrez le montant de votre capital total (ex: `100000` ou `5000`) :"
+    )
+
+
+@bot.message_handler(commands=['pari', 'paris'])
+def handle_paris(msg):
+    if not check_rate_limit(msg.from_user.id):
+        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes entre deux requêtes.")
+
+    bot.send_chat_action(msg.chat.id, 'typing')
+    analyse = obtenir_analyses_matchs()
+    bot.reply_to(msg, analyse)
 
 
 # ---------------------------------------------------------
-# 5. GESTION DES CALLBACKS (BOUTONS) & SAISIE MANUELLE
+# 6. CALLBACKS & TEXT MESSAGES
 # ---------------------------------------------------------
-@bot.callback_query_handler(func=lambda call: call.data.startswith('crypto_'))
-def handle_crypto_callback(call):
-    symbol = call.data.replace('crypto_', '')
+@bot.callback_query_handler(func=lambda call: True)
+def handle_query(call):
+    chat_id = call.message.chat.id
+    user_id = call.from_user.id
 
-    if symbol == "CUSTOM":
-        msg = bot.send_message(
-            call.message.chat.id,
-            "✍️ Entrez le symbole de la crypto à analyser (ex: `ADAUSDT`, `DOGEUSDT`, `AVAXUSDT`) :"
-        )
-        bot.register_next_step_handler(msg, process_custom_symbol)
-    else:
-        bot.answer_callback_query(call.id, text=f"Analyse de {symbol} en cours...")
-        res = analyser_crypto(symbol)
-        bot.send_message(call.message.chat.id, res, parse_mode="Markdown")
+    if not check_rate_limit(user_id):
+        bot.answer_callback_query(call.id, "⏳ Anti-Spam : Patientez 3 secondes...", show_alert=True)
+        return
+
+    if call.data.startswith("c_"):
+        pair = call.data.replace("c_", "")
+        if pair == "custom":
+            user_states[chat_id] = "WAITING_CRYPTO_PAIR"
+            bot.send_message(chat_id, "🔍 Tape le nom de la paire à analyser (ex: `PEPEUSDT`, `ADAUSDT`) :")
+        else:
+            bot.answer_callback_query(call.id, "Analyse du marché en cours...")
+            bot.send_chat_action(chat_id, "typing")
+            res = analyser_crypto(pair)
+            bot.send_message(chat_id, res)
+
+    elif call.data.startswith("bt_"):
+        pair = call.data.replace("bt_", "")
+        if pair == "custom":
+            user_states[chat_id] = "WAITING_BACKTEST_PAIR"
+            bot.send_message(chat_id, "🔍 Tape le nom de la paire pour le backtest (ex: `DOGEUSDT`, `LINKUSDT`) :")
+        else:
+            bot.answer_callback_query(call.id, "Calcul du backtest...")
+            bot.send_chat_action(chat_id, "typing")
+            res = executer_backtest(pair)
+            bot.send_message(chat_id, res)
 
 
-def process_custom_symbol(message):
-    symbol = message.text.strip().upper()
-    res = analyser_crypto(symbol)
-    bot.send_message(message.chat.id, res, parse_mode="Markdown")
+@bot.message_handler(func=lambda msg: not msg.text.startswith('/'))
+def handle_text_messages(msg):
+    chat_id = msg.chat.id
+    user_id = msg.from_user.id
+    state = user_states.get(chat_id)
+
+    if state == "WAITING_BANKROLL":
+        if not check_rate_limit(user_id):
+            return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
+
+        user_states[chat_id] = None
+        cleaned_text = msg.text.replace(" ", "").replace(",", ".").strip()
+        try:
+            capital = float(cleaned_text)
+            mise = capital * 0.02
+            res = (
+                f"💼 **CALCUL DE RISQUE (2% STRICT)**\n\n"
+                f"💵 **Capital indiqué :** `{capital:,.2f}`\n"
+                f"📊 **Risque autorisé :** `2%`\n"
+                f"🎯 **Mise maximale recommandée :** `{mise:,.2f}`"
+                f"{WARN}"
+            )
+            bot.send_message(chat_id, res)
+        except ValueError:
+            bot.send_message(chat_id, "❌ Veuillez entrer un nombre valide (ex: `100000`). Tapez `/bankroll` pour recommencer.")
+
+    elif state == "WAITING_CRYPTO_PAIR":
+        if not check_rate_limit(user_id):
+            return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
+
+        user_states[chat_id] = None
+        bot.send_chat_action(chat_id, "typing")
+        res = analyser_crypto(msg.text.strip())
+        bot.send_message(chat_id, res)
+
+    elif state == "WAITING_BACKTEST_PAIR":
+        if not check_rate_limit(user_id):
+            return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
+
+        user_states[chat_id] = None
+        bot.send_chat_action(chat_id, "typing")
+        res = executer_backtest(msg.text.strip())
+        bot.send_message(chat_id, res)
 
 
 # ---------------------------------------------------------
-# 6. LANCEMENT DU BOT
+# 7. LANCEMENT
 # ---------------------------------------------------------
-if __name__ == '__main__':
-    print("🚀 Bot démarré avec succès !")
-    bot.infinity_polling()
+if __name__ == "__main__":
+    keep_alive()
+    print("🤖 Bot démarré avec succès !")
+    bot.infinity_polling(none_stop=True)
