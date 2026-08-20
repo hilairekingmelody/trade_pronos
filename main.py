@@ -59,9 +59,48 @@ user_last_request_time = {}
 ANTI_SPAM_DELAY = 3.0
 DAILY_LIMIT_FREE = 5
 
+# Catalogues de données (Affiliation & Ebooks)
+AFFILIATES = {
+    "1xbet": {
+        "name": "1xBet",
+        "link": "https://reffpa.com/L?tag=d_5087549m_1573c_whatsapp&site=5087549&ad=1573",
+        "promo": "HILAIREBET",
+        "desc": (
+            "🎁 **OFFRE EXCLUSIVE 1XBET**\n\n"
+            "Inscrivez-vous sur 1xBet et profitez de jusqu'à **200% de bonus** sur votre premier dépôt !\n\n"
+            "👉 **Lien d'inscription :** [Cliquez ici pour vous inscrire](https://reffpa.com/L?tag=d_5087549m_1573c_whatsapp&site=5087549&ad=1573)\n"
+            "🔑 **Code Promo Exclusif :** `HILAIREBET`"
+        )
+    }
+}
+
+EBOOKS = {
+    "mkt": {
+        "title": "Formation en Marketing Digital",
+        "file_name": "marketing1.pdf",
+        "stars": 150,
+        "price_usd": "3$",
+        "summary": "📈 **Guide Complet Marketing Digital**\nApprenez à maîtriser les leviers du web, la publicité en ligne, l'acquisition de clients et les stratégies de conversion pour développer votre activité."
+    },
+    "web": {
+        "title": "Formation en Création des Sites Web",
+        "file_name": "web1.pdf",
+        "stars": 150,
+        "price_usd": "3$",
+        "summary": "💻 **Guide Création de Sites Web**\nDécouvrez étape par étape comment concevoir, structurer et déployer des sites internet professionnels et modernes sans prérequis complexes."
+    },
+    "med": {
+        "title": "Méditation Guide Complet",
+        "file_name": "meditation1.pdf",
+        "stars": 250,
+        "price_usd": "5$",
+        "summary": "🧘 **Guide Complet de Méditation**\nUn manuel pratique et immersif pour maîtriser la gestion du stress, améliorer votre concentration quotidienne et équilibrer votre mental."
+    }
+}
+
 
 # ---------------------------------------------------------
-# 3. BASE DE DONNÉES SQLITE (Quotas & Abonnements 30 jours)
+# 3. BASE DE DONNÉES SQLITE
 # ---------------------------------------------------------
 DB_FILE = "users.db"
 
@@ -83,10 +122,6 @@ def init_db():
 
 
 def check_and_consume_quota(user_id):
-    """
-    Vérifie et consomme 1 requête.
-    Retourne (Autorisé: bool, Message/Quota: str)
-    """
     if user_id == ADMIN_ID:
         return True, "ADMIN"
 
@@ -108,12 +143,10 @@ def check_and_consume_quota(user_id):
 
     status, requests_count, last_date, vip_expiry = row[0], row[1], row[2], row[3]
 
-    # Vérification de l'expiration du statut PREMIUM / VIP (30 jours)
     if status in ["PREMIUM", "VIP"]:
         if vip_expiry:
             expiry_dt = datetime.strptime(vip_expiry, "%Y-%m-%d %H:%M:%S")
             if datetime.now() > expiry_dt:
-                # Abonnement expiré ! Rétrogradation en FREE
                 status = "FREE"
                 cursor.execute("UPDATE users SET status = 'FREE', vip_expiry = NULL WHERE user_id = ?", (user_id,))
                 conn.commit()
@@ -124,7 +157,6 @@ def check_and_consume_quota(user_id):
             conn.close()
             return True, "VIP Illimité"
 
-    # Réinitialisation si c'est le premier appel d'un nouveau jour
     if last_date != today_str:
         cursor.execute(
             "UPDATE users SET daily_requests = 1, last_request_date = ? WHERE user_id = ?",
@@ -134,12 +166,10 @@ def check_and_consume_quota(user_id):
         conn.close()
         return True, f"FREE (1/{DAILY_LIMIT_FREE})"
 
-    # Si le quota journalier est atteint
     if requests_count >= DAILY_LIMIT_FREE:
         conn.close()
         return False, f"FREE ({requests_count}/{DAILY_LIMIT_FREE})"
 
-    # Sinon incrémentation
     new_count = requests_count + 1
     cursor.execute("UPDATE users SET daily_requests = ? WHERE user_id = ?", (new_count, user_id))
     conn.commit()
@@ -151,7 +181,7 @@ init_db()
 
 
 # ---------------------------------------------------------
-# 4. SÉCURITÉ & ANTI-SPAM STRICT
+# 4. SÉCURITÉ & UTILS
 # ---------------------------------------------------------
 def check_rate_limit(user_id):
     now = time.time()
@@ -338,7 +368,7 @@ def obtenir_analyses_matchs():
 
 
 # ---------------------------------------------------------
-# 7. COMMANDES GRATUITES (Ne consomment PAS de quota)
+# 7. COMMANDES GRATUITES (Info, VIP, Affiliation, Ebooks)
 # ---------------------------------------------------------
 @bot.message_handler(commands=["start"])
 def send_welcome(msg):
@@ -346,7 +376,9 @@ def send_welcome(msg):
     text = (
         "👋 **Bienvenue sur TRADING & PRONOSTICS BOT !**\n\n"
         "👑 **Membre Gratuit :** 5 requêtes d'analyse offertes par jour.\n"
-        "⭐ **Pass VIP (30 Jours) :** Accès illimité 24/7 ! Tapez `/vip`."
+        "⭐ **Pass VIP (30 Jours) :** Accès illimité 24/7 ! Tapez `/vip`.\n"
+        "🤝 **Partenaires :** Offres exclusives via `/affiliation`.\n"
+        "📚 **Formations :** Découvrez nos Ebooks via `/ebooks`."
     )
     bot.reply_to(msg, text)
 
@@ -355,12 +387,14 @@ def send_welcome(msg):
 def send_help(msg):
     user_states[msg.chat.id] = None
     text = (
-        "🤖 **MegaBot Trading & Sport v3.1**\n\n"
+        "🤖 **MegaBot Trading & Sport v3.2**\n\n"
         "📈 `/crypto` : Analyses crypto en temps réel (1 req)\n"
         "📉 `/backtest` : Simulation stratégie 500 bougies (1 req)\n"
         "⚽ `/pari` : Pronostics football du jour (1 req)\n"
         "💰 `/bankroll` : Gestion de capital 2% (1 req)\n"
-        "⭐ `/vip` : S'abonner pour 30 jours illimités (Gratuit)\n"
+        "⭐ `/vip` : Pass VIP 30 jours illimités\n"
+        "🤝 `/affiliation` : Codes promo et liens partenaires\n"
+        "📚 `/ebooks` : Formations PDF payables en Stars\n"
         f"{WARN}"
     )
     bot.reply_to(msg, text)
@@ -383,6 +417,41 @@ def command_vip(msg):
         "Cliquez ci-dessous pour lancer le paiement sécurisé :"
     )
     bot.reply_to(msg, txt, reply_markup=markup)
+
+
+# 🤝 COMMANDE AFFILIATION
+@bot.message_handler(commands=["affiliation", "partenaires", "partenaire"])
+def command_affiliation(msg):
+    user_states[msg.chat.id] = None
+    markup = InlineKeyboardMarkup()
+
+    for key, data in AFFILIATE.items():
+        markup.add(InlineKeyboardButton(f"🎁 Partner {data['name']}", callback_data=f"aff_{key}"))
+
+    bot.reply_to(
+        msg,
+        "🤝 **PARTENAIRES & CODES PROMO EXCLUSIFS**\n\n"
+        "Sélectionnez une plateforme partenaire ci-dessous pour obtenir le lien d'inscription et le code promo exclusif :",
+        reply_markup=markup
+    )
+
+
+# 📚 COMMANDE EBOOKS
+@bot.message_handler(commands=["ebooks", "ebook", "formations", "formation"])
+def command_ebooks(msg):
+    user_states[msg.chat.id] = None
+    markup = InlineKeyboardMarkup()
+
+    for key, data in EBOOKS.items():
+        btn_text = f"📘 {data['title']} ({data['price_usd']})"
+        markup.add(InlineKeyboardButton(btn_text, callback_data=f"eb_view_{key}"))
+
+    bot.reply_to(
+        msg,
+        "📚 **CATALOGUE DE FORMATIONS & EBOOKS**\n\n"
+        "Cliquez sur une formation ci-dessous pour lire le résumé et la commander en Stars Telegram :",
+        reply_markup=markup
+    )
 
 
 @bot.message_handler(commands=["admin"])
@@ -433,13 +502,13 @@ def cmd_grant_premium(msg):
 
 
 # ---------------------------------------------------------
-# 8. COMMANDES PAYANTES (Consomment 1 requête chacune)
+# 8. COMMANDES PAYANTES (Consomment 1 requête)
 # ---------------------------------------------------------
 @bot.message_handler(commands=["crypto"])
 def command_crypto(msg):
     user_states[msg.chat.id] = None
     if not check_rate_limit(msg.from_user.id):
-        return bot.reply_to(msg, "⏳ *Anti-Spam :* Veuillez patienter 3 secondes entre vos clics.")
+        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
 
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
@@ -458,7 +527,7 @@ def command_crypto(msg):
 def command_backtest(msg):
     user_states[msg.chat.id] = None
     if not check_rate_limit(msg.from_user.id):
-        return bot.reply_to(msg, "⏳ *Anti-Spam :* Veuillez patienter 3 secondes entre vos clics.")
+        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
 
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
@@ -475,7 +544,7 @@ def command_backtest(msg):
 def handle_paris(msg):
     user_states[msg.chat.id] = None
     if not check_rate_limit(msg.from_user.id):
-        return bot.reply_to(msg, "⏳ *Anti-Spam :* Veuillez patienter 3 secondes entre vos clics.")
+        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
 
     allowed, quota_info = check_and_consume_quota(msg.from_user.id)
     if not allowed:
@@ -491,28 +560,45 @@ def handle_paris(msg):
 @bot.message_handler(commands=["bankroll"])
 def bankroll_start(msg):
     if not check_rate_limit(msg.from_user.id):
-        return bot.reply_to(msg, "⏳ *Anti-Spam :* Veuillez patienter 3 secondes entre vos clics.")
+        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
 
     user_states[msg.chat.id] = "WAITING_BANKROLL"
     bot.reply_to(msg, "💰 **GESTION DE CAPITAL (2%)**\n\nEntrez votre capital total (ex: `5000`) :")
 
 
 # ---------------------------------------------------------
-# 9. PAIEMENTS TELEGRAM STARS (Fix du blocage /vip)
+# 9. PAIEMENTS TELEGRAM STARS (VIP & EBOOKS)
 # ---------------------------------------------------------
 @bot.callback_query_handler(func=lambda call: call.data == "buy_vip_stars")
-def process_buy_stars(call):
-    # Payload unique généré à chaque clic avec timestamp pour éviter le blocage
+def process_buy_vip_stars(call):
     payload_unique = f"vip_sub_{call.from_user.id}_{int(time.time())}"
-
     bot.send_invoice(
         call.message.chat.id,
         title="Pass VIP 30 Jours",
         description="Accès illimité aux signaux Trading Crypto, Backtests et Pronostics Sportifs pendant 30 jours.",
         invoice_payload=payload_unique,
-        provider_token="",  # Laisser vide pour Telegram Stars
-        currency="XTR",     # Code devise officiel pour Telegram Stars
+        provider_token="",
+        currency="XTR",
         prices=[LabeledPrice("Abonnement 1 Mois", 250)]
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("buy_eb_"))
+def process_buy_ebook_stars(call):
+    ebook_key = call.data.replace("buy_eb_", "")
+    ebook = EBOOKS.get(ebook_key)
+    if not ebook:
+        return
+
+    payload_unique = f"eb_pay_{ebook_key}_{call.from_user.id}_{int(time.time())}"
+    bot.send_invoice(
+        call.message.chat.id,
+        title=ebook["title"],
+        description=f"Téléchargement immédiat du PDF : {ebook['title']}",
+        invoice_payload=payload_unique,
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice(f"Ebook {ebook['title']}", ebook["stars"])]
     )
 
 
@@ -523,21 +609,43 @@ def process_pre_checkout(query: PreCheckoutQuery):
 
 @bot.message_handler(content_types=['successful_payment'])
 def process_successful_payment(msg):
+    payload = msg.successful_payment.invoice_payload
     user_id = msg.from_user.id
-    expiry_date = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
 
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE users SET status = 'PREMIUM', vip_expiry = ? WHERE user_id = ?", (expiry_date, user_id))
-    conn.commit()
-    conn.close()
+    # Cas 1 : Paiement Abonnement VIP
+    if payload.startswith("vip_sub_"):
+        expiry_date = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
 
-    bot.reply_to(
-        msg,
-        f"🎉 **FÉLICITATIONS ET BIENVENUE VIP !** 🎉\n\n"
-        f"Votre abonnement de **30 Jours** a été activé avec succès !\n"
-        f"📅 Valable jusqu'au : `{expiry_date}`"
-    )
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET status = 'PREMIUM', vip_expiry = ? WHERE user_id = ?", (expiry_date, user_id))
+        conn.commit()
+        conn.close()
+
+        bot.reply_to(
+            msg,
+            f"🎉 **FÉLICITATIONS ET BIENVENUE VIP !** 🎉\n\n"
+            f"Votre abonnement de **30 Jours** a été activé avec succès !\n"
+            f"📅 Valable jusqu'au : `{expiry_date}`"
+        )
+
+    # Cas 2 : Achat d'un Ebook PDF
+    elif payload.startswith("eb_pay_"):
+        parts = payload.split("_")
+        ebook_key = parts[2]
+        ebook = EBOOKS.get(ebook_key)
+
+        if ebook:
+            file_path = os.path.join("ebooks", ebook["file_name"])
+            if os.path.exists(file_path):
+                bot.reply_to(msg, f"✅ **Paiement confirmé pour :** *{ebook['title']}* !\nVoici votre fichier PDF :")
+                with open(file_path, "rb") as pdf_file:
+                    bot.send_document(msg.chat.id, pdf_file, caption=f"📘 **{ebook['title']}**")
+            else:
+                bot.reply_to(
+                    msg,
+                    f"✅ **Paiement confirmé !**\n⚠️ Le fichier `{ebook['file_name']}` n'est pas encore présent dans le dossier `ebooks/` du serveur. Contactez l'administrateur."
+                )
 
 
 # ---------------------------------------------------------
@@ -552,7 +660,32 @@ def handle_query(call):
         bot.answer_callback_query(call.id, "⏳ Anti-Spam : Veuillez patienter 3 secondes...", show_alert=True)
         return
 
-    if call.data.startswith("c_"):
+    # Callbacks Affiliation
+    if call.data.startswith("aff_"):
+        aff_key = call.data.replace("aff_", "")
+        partner = AFFILIATE.get(aff_key)
+        if partner:
+            bot.answer_callback_query(call.id)
+            bot.send_message(chat_id, partner["desc"], disable_web_page_preview=False)
+
+    # Callbacks Ebooks View
+    elif call.data.startswith("eb_view_"):
+        ebook_key = call.data.replace("eb_view_", "")
+        ebook = EBOOKS.get(ebook_key)
+        if ebook:
+            bot.answer_callback_query(call.id)
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton(f"⭐ Acheter ({ebook['stars']} Stars)", callback_data=f"buy_eb_{ebook_key}"))
+
+            txt = (
+                f"{ebook['summary']}\n\n"
+                f"🏷️ **Prix :** `{ebook['price_usd']}` ({ebook['stars']} Stars Telegram)\n"
+                f"📥 **Format :** Fichier PDF téléchargeable instantanément."
+            )
+            bot.send_message(chat_id, txt, reply_markup=markup)
+
+    # Callbacks Crypto
+    elif call.data.startswith("c_"):
         pair = call.data.replace("c_", "")
         if pair == "custom":
             user_states[chat_id] = "WAITING_CRYPTO_PAIR"
@@ -568,6 +701,7 @@ def handle_query(call):
             bot.answer_callback_query(call.id, "Analyse en cours...")
             bot.send_message(chat_id, f"{analyser_crypto(pair)}\n\n📊 *Consommation :* `{quota_info}`")
 
+    # Callbacks Backtest
     elif call.data.startswith("bt_"):
         pair = call.data.replace("bt_", "")
         if pair == "custom":
@@ -654,5 +788,5 @@ def handle_text_messages(msg):
 # ---------------------------------------------------------
 if __name__ == "__main__":
     keep_alive()
-    print("🤖 Bot Monétisé & Sécurisé prêt !")
+    print("🤖 Bot complet avec Affiliation & Ebooks prêt !")
     bot.infinity_polling(none_stop=True)
