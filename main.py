@@ -18,7 +18,7 @@ from telebot.types import (
 )
 
 # ---------------------------------------------------------
-# 1. SERVEUR WEB (Keep Alive Render)
+# 1. SERVEUR WEB (Keep Alive Render & UptimeRobot)
 # ---------------------------------------------------------
 app = Flask("")
 
@@ -29,7 +29,7 @@ def home():
 
 
 def run_flask():
-    port = int(os.environ.get("PORT", "5000"))
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
 
 
@@ -387,7 +387,7 @@ def send_welcome(msg):
 def send_help(msg):
     user_states[msg.chat.id] = None
     text = (
-        "🤖 **MegaBot Trading & Sport v3.2**\n\n"
+        "🤖 **MegaBot Trading & Sport v3.3**\n\n"
         "📈 `/crypto` : Analyses crypto en temps réel (1 req)\n"
         "📉 `/backtest` : Simulation stratégie 500 bougies (1 req)\n"
         "⚽ `/pari` : Pronostics football du jour (1 req)\n"
@@ -419,14 +419,14 @@ def command_vip(msg):
     bot.reply_to(msg, txt, reply_markup=markup)
 
 
-# 🤝 COMMANDE AFFILIATION
+# 🤝 COMMANDE AFFILIATION (VERIFIÉE & CORRIGÉE)
 @bot.message_handler(commands=["affiliation", "partenaires", "partenaire"])
 def command_affiliation(msg):
     user_states[msg.chat.id] = None
     markup = InlineKeyboardMarkup()
 
-    for key, data in AFFILIATE.items():
-        markup.add(InlineKeyboardButton(f"🎁 Partner {data['name']}", callback_data=f"aff_{key}"))
+    for key, data in AFFILIATES.items():
+        markup.add(InlineKeyboardButton(f"🎁 Partenaire {data['name']}", callback_data=f"aff_{key}"))
 
     bot.reply_to(
         msg,
@@ -436,7 +436,7 @@ def command_affiliation(msg):
     )
 
 
-# 📚 COMMANDE EBOOKS
+# 📚 COMMANDE EBOOKS (VERIFIÉE)
 @bot.message_handler(commands=["ebooks", "ebook", "formations", "formation"])
 def command_ebooks(msg):
     user_states[msg.chat.id] = None
@@ -660,10 +660,10 @@ def handle_query(call):
         bot.answer_callback_query(call.id, "⏳ Anti-Spam : Veuillez patienter 3 secondes...", show_alert=True)
         return
 
-    # Callbacks Affiliation
+    # Callbacks Affiliation (VERIFIÉ & CORRIGÉ)
     if call.data.startswith("aff_"):
         aff_key = call.data.replace("aff_", "")
-        partner = AFFILIATE.get(aff_key)
+        partner = AFFILIATES.get(aff_key)
         if partner:
             bot.answer_callback_query(call.id)
             bot.send_message(chat_id, partner["desc"], disable_web_page_preview=False)
