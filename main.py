@@ -1,4 +1,6 @@
 import os
+import re
+import sqlite3
 import time
 from datetime import datetime
 from threading import Thread
@@ -11,7 +13,7 @@ import telebot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 # ---------------------------------------------------------
-# 1. SERVEUR WEB (Keep Alive pour Render)
+# 1. SERVEUR WEB (Keep Alive Render)
 # ---------------------------------------------------------
 app = Flask("")
 
@@ -33,7 +35,7 @@ def keep_alive():
 
 
 # ---------------------------------------------------------
-# 2. CONFIGURATION, SECRETS ET ANTI-SPAM (Étape 2)
+# 2. CONFIGURATION & SECRETS
 # ---------------------------------------------------------
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip().replace('"', "").replace("'", "")
 FOOTBALL_KEY = os.environ.get("FOOTBALL_API_KEY", "").strip() or os.environ.get("API_FOOTBALL", "").strip()
@@ -48,12 +50,58 @@ bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 WARN = "\n\n⚠️ *Attention :* Gestion de risque obligatoire. Interdit aux -18 ans."
 
 user_states = {}
-
-# Protection Anti-Spam
 user_last_request_time = {}
 ANTI_SPAM_DELAY = 3.0
 
 
+# ---------------------------------------------------------
+# 3. BASE DE DONNÉES SQLITE (Étape 5 & 6)
+# ---------------------------------------------------------
+DB_FILE = "users.db"
+
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            status TEXT DEFAULT 'FREE',
+            daily_requests INTEGER DEFAULT 0,
+            last_request_date TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def get_or_create_user(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT status, daily_requests, last_request_date FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    if not row:
+        cursor.execute(
+            "INSERT INTO users (user_id, status, daily_requests, last_request_date) VALUES (?, 'FREE', 0, ?)",
+            (user_id, today_str),
+        )
+        conn.commit()
+        conn.close()
+        return "FREE", 0, today_str
+
+    conn.close()
+    return row[0], row[1], row[2]
+
+
+init_db()
+
+
+# ---------------------------------------------------------
+# 4. FONCTIONS DE SÉCURITÉ & VALIDATION (Étapes 1, 3, 4, 7)
+# ---------------------------------------------------------
 def check_rate_limit(user_id):
     now = time.time()
     last_time = user_last_request_time.get(user_id, 0)
@@ -67,8 +115,13 @@ def is_admin(user_id):
     return user_id == ADMIN_ID
 
 
+def sanitize_symbol(symbol):
+    cleaned = re.sub(r"[^A-Z0-9]", "", symbol.upper())
+    return cleaned if 2 <= len(cleaned) <= 12 else None
+
+
 # ---------------------------------------------------------
-# 3. FIX BINANCE & INDICATEURS CRYPTO
+# 5. FIX BINANCE & INDICATEURS CRYPTO
 # ---------------------------------------------------------
 def requete_binance_securisee(url_path):
     domaines = [
@@ -93,12 +146,15 @@ def requete_binance_securisee(url_path):
 
 
 def analyser_crypto(pair):
-    pair = pair.upper().replace("/", "").replace("-", "")
-    url_path = f"/api/v3/klines?symbol={pair}&interval=1h&limit=100"
+    pair_clean = sanitize_symbol(pair)
+    if not pair_clean:
+        return "❌ Symbole invalide. Exemple valide : `BTCUSDT`."
 
+    url_path = f"/api/v3/klines?symbol={pair_clean}&interval=1h&limit=100"
     data = requete_binance_securisee(url_path)
+
     if not data:
-        return f"❌ Paire `{pair}` introuvable ou indisponible actuellement (Blocage réseau/serveur)."
+        return f"❌ Paire `{pair_clean}` introuvable ou indisponible actuellement."
 
     try:
         closes = pd.Series([float(c[4]) for c in data])
@@ -144,7 +200,7 @@ def analyser_crypto(pair):
         trend = "📈 Haussière" if price > ema50 else "📉 Baissière"
 
         return (
-            f"📊 **ANALYSE TEMPS RÉEL : {pair}**\n\n"
+            f"📊 **ANALYSE TEMPS RÉEL : {pair_clean}**\n\n"
             f"💰 **Prix actuel :** `{price:,.4f} $`\n"
             f"📈 **Tendance globale :** {trend}\n"
             f"🔹 **RSI (14) :** `{rsi:.1f}`\n"
@@ -158,12 +214,15 @@ def analyser_crypto(pair):
 
 
 def executer_backtest(pair):
-    pair = pair.upper().replace("/", "").replace("-", "")
-    url_path = f"/api/v3/klines?symbol={pair}&interval=1h&limit=500"
+    pair_clean = sanitize_symbol(pair)
+    if not pair_clean:
+        return "❌ Symbole invalide pour le backtest."
 
+    url_path = f"/api/v3/klines?symbol={pair_clean}&interval=1h&limit=500"
     data = requete_binance_securisee(url_path)
+
     if not data:
-        return f"❌ Paire `{pair}` indisponible pour le backtest."
+        return f"❌ Paire `{pair_clean}` indisponible pour le backtest."
 
     try:
         closes = pd.Series([float(c[4]) for c in data])
@@ -184,7 +243,7 @@ def executer_backtest(pair):
         winrate = (wins / total * 100) if total > 0 else 0
         return (
             f"📈 **BACKTEST STRATÉGIE (500 Bougies 1H)**\n\n"
-            f"🪙 **Paire :** `{pair}`\n"
+            f"🪙 **Paire :** `{pair_clean}`\n"
             f"🔢 **Signaux exécutés :** `{total}`\n"
             f"✅ **Trades gagnants :** `{wins}`\n"
             f"📊 **Taux de réussite :** `{winrate:.1f}%`"
@@ -195,14 +254,17 @@ def executer_backtest(pair):
 
 
 # ---------------------------------------------------------
-# 4. FOOTBALL
+# 6. FOOTBALL
 # ---------------------------------------------------------
 def obtenir_analyses_matchs():
     url = "https://api.football-data.org/v4/matches"
     headers = {"X-Auth-Token": FOOTBALL_KEY}
 
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=5)
+        if response.status_code != 200:
+            return "⚽ Données football temporairement indisponibles."
+
         data = response.json()
         matches = data.get("matches", [])[:3]
 
@@ -216,22 +278,23 @@ def obtenir_analyses_matchs():
             competition = match['competition']['name']
 
             message += f"**{idx}. {equipe_dom} vs {equipe_ext}** ({competition})\n"
-            message += f"📊 *Analyse :* Rencontre équilibrée. Avantage à domicile pour {equipe_dom}.\n"
+            message += f"📊 *Analyse :* Avantage à domicile pour {equipe_dom}.\n"
             message += f"💡 *Pronostic :* Plus de 1.5 buts / Victoire ou Nul {equipe_dom}\n\n"
 
         return message
     except Exception:
-        return "⚠️ Erreur lors de la récupération des données de l'API Football."
+        return "⚠️ Service football indisponible actuellement."
 
 
 # ---------------------------------------------------------
-# 5. COMMANDES DE DIALOGUE & ADMINISTRATION
+# 7. COMMANDES TELEGRAM & ADMIN (Étape 6)
 # ---------------------------------------------------------
 @bot.message_handler(commands=["start"])
 def send_welcome(msg):
+    get_or_create_user(msg.from_user.id)
     text = (
         "👋 **Bienvenue sur TRADING & PRONOSTICS BOT !**\n\n"
-        "Cliquez sur la boîte de **Menu** en bas à gauche pour découvrir toutes les fonctionnalités !"
+        "Utilisez le menu ci-dessous pour lancer vos analyses en toute sécurité."
     )
     bot.reply_to(msg, text)
 
@@ -240,14 +303,11 @@ def send_welcome(msg):
 def send_help(msg):
     text = (
         "🤖 **MegaBot Trading & Sport v2.3**\n\n"
-        "Voici la liste complète des fonctionnalités disponibles :\n\n"
-        "📈 **Trading Crypto**\n"
-        "• `/crypto` : Obtenir un signal en temps réel (menu interactif)\n"
-        "• `/backtest` : Tester la stratégie technique sur 500 bougies\n\n"
-        "⚽ **Football**\n"
-        "• `/pari` : Analyses et conseils sur les 3 gros matchs du jour\n\n"
-        "💰 **Gestion de Capital**\n"
-        "• `/bankroll` : Calculateur de mise sécurisée (exposition à 2%)\n"
+        "Voici les fonctionnalités disponibles :\n\n"
+        "📈 `/crypto` : Analyses & signaux en temps réel\n"
+        "📉 `/backtest` : Simulation de stratégie sur 500 bougies\n"
+        "⚽ `/pari` : Pronostics football du jour\n"
+        "💰 `/bankroll` : Gestion de capital (2%)\n"
         f"{WARN}"
     )
     bot.reply_to(msg, text)
@@ -256,82 +316,99 @@ def send_help(msg):
 @bot.message_handler(commands=["admin"])
 def cmd_admin(msg):
     if not is_admin(msg.from_user.id):
-        bot.reply_to(msg, "⛔ **Accès refusé.** Vous n'êtes pas l'administrateur.")
+        bot.reply_to(msg, "⛔ **Accès refusé.** Réservé à l'administrateur.")
         return
 
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM users")
+    total_users = cursor.fetchone()[0]
+    conn.close()
+
     txt = (
-        "⚙️ **ESPACE ADMINISTRATION**\n\n"
-        "🔑 Status : **Connecté Administrateur**\n"
-        f"🆔 Votre Admin ID : `{ADMIN_ID}`\n\n"
-        "Vous disposez du contrôle total sur le bot."
+        "⚙️ **PANNEAU D'ADMINISTRATION**\n\n"
+        f"🆔 **ID Admin :** `{ADMIN_ID}`\n"
+        f"👥 **Utilisateurs enregistrés :** `{total_users}`\n\n"
+        "💡 *Commande d'attribution Premium :*\n"
+        "`/grant_premium <user_id>`"
     )
     bot.reply_to(msg, txt)
+
+
+@bot.message_handler(commands=["grant_premium"])
+def cmd_grant_premium(msg):
+    if not is_admin(msg.from_user.id):
+        return
+
+    parts = msg.text.split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        bot.reply_to(msg, "❌ Format correct : `/grant_premium <user_id>`")
+        return
+
+    target_id = int(parts[1])
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET status = 'PREMIUM' WHERE user_id = ?", (target_id,))
+    conn.commit()
+    conn.close()
+
+    bot.reply_to(msg, f"✅ L'utilisateur `{target_id}` est maintenant **PREMIUM** !")
 
 
 @bot.message_handler(commands=["crypto"])
 def command_crypto(msg):
     if not check_rate_limit(msg.from_user.id):
-        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes entre deux requêtes.")
+        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
 
     markup = InlineKeyboardMarkup(row_width=2)
-    b1 = InlineKeyboardButton("🟡 BTC/USDT", callback_data="c_BTCUSDT")
-    b2 = InlineKeyboardButton("🔹 ETH/USDT", callback_data="c_ETHUSDT")
-    b3 = InlineKeyboardButton("☀️ SOL/USDT", callback_data="c_SOLUSDT")
-    b4 = InlineKeyboardButton("🔶 BNB/USDT", callback_data="c_BNBUSDT")
-    b5 = InlineKeyboardButton("🌐 XRP/USDT", callback_data="c_XRPUSDT")
-    b6 = InlineKeyboardButton("✍️ Autre symbole...", callback_data="c_custom")
-    markup.add(b1, b2, b3, b4, b5, b6)
-
-    bot.reply_to(
-        msg,
-        "📈 **ANALYSE CRYPTO EN TEMPS RÉEL**\n\nSélectionne une paire ci-dessous ou clique sur *Autre symbole* :",
-        reply_markup=markup
+    markup.add(
+        InlineKeyboardButton("🟡 BTC/USDT", callback_data="c_BTCUSDT"),
+        InlineKeyboardButton("🔹 ETH/USDT", callback_data="c_ETHUSDT"),
+        InlineKeyboardButton("☀️ SOL/USDT", callback_data="c_SOLUSDT"),
+        InlineKeyboardButton("🔶 BNB/USDT", callback_data="c_BNBUSDT"),
+        InlineKeyboardButton("🌐 XRP/USDT", callback_data="c_XRPUSDT"),
+        InlineKeyboardButton("✍️ Autre symbole...", callback_data="c_custom")
     )
+
+    bot.reply_to(msg, "📈 **ANALYSE CRYPTO EN TEMPS RÉEL**\n\nSélectionnez une paire :", reply_markup=markup)
 
 
 @bot.message_handler(commands=["backtest"])
 def command_backtest(msg):
     if not check_rate_limit(msg.from_user.id):
-        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes entre deux requêtes.")
+        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
 
     markup = InlineKeyboardMarkup(row_width=2)
-    b1 = InlineKeyboardButton("🟡 BTC/USDT", callback_data="bt_BTCUSDT")
-    b2 = InlineKeyboardButton("🔹 ETH/USDT", callback_data="bt_ETHUSDT")
-    b3 = InlineKeyboardButton("☀️ SOL/USDT", callback_data="bt_SOLUSDT")
-    b4 = InlineKeyboardButton("✍️ Autre symbole...", callback_data="bt_custom")
-    markup.add(b1, b2, b3, b4)
-
-    bot.reply_to(
-        msg,
-        "📉 **BACKTEST STRATÉGIE**\n\nSélectionne une paire pour lancer la simulation sur 500 bougies :",
-        reply_markup=markup
+    markup.add(
+        InlineKeyboardButton("🟡 BTC/USDT", callback_data="bt_BTCUSDT"),
+        InlineKeyboardButton("🔹 ETH/USDT", callback_data="bt_ETHUSDT"),
+        InlineKeyboardButton("☀️ SOL/USDT", callback_data="bt_SOLUSDT"),
+        InlineKeyboardButton("✍️ Autre symbole...", callback_data="bt_custom")
     )
+
+    bot.reply_to(msg, "📉 **BACKTEST STRATÉGIE**\n\nSélectionnez une paire :", reply_markup=markup)
 
 
 @bot.message_handler(commands=["bankroll"])
 def bankroll_start(msg):
     if not check_rate_limit(msg.from_user.id):
-        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes entre deux requêtes.")
+        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
 
     user_states[msg.chat.id] = "WAITING_BANKROLL"
-    bot.reply_to(
-        msg,
-        "💰 **GESTION DE CAPITAL (Règle des 2%)**\n\nEntrez le montant de votre capital total (ex: `100000` ou `5000`) :"
-    )
+    bot.reply_to(msg, "💰 **GESTION DE CAPITAL (2%)**\n\nEntrez votre capital total (ex: `5000`) :")
 
 
 @bot.message_handler(commands=['pari', 'paris'])
 def handle_paris(msg):
     if not check_rate_limit(msg.from_user.id):
-        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes entre deux requêtes.")
+        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
 
     bot.send_chat_action(msg.chat.id, 'typing')
-    analyse = obtenir_analyses_matchs()
-    bot.reply_to(msg, analyse)
+    bot.reply_to(msg, obtenir_analyses_matchs())
 
 
 # ---------------------------------------------------------
-# 6. CALLBACKS & TEXT MESSAGES
+# 8. GESTION DES CALLBACKS ET DU TEXTE LIBRE
 # ---------------------------------------------------------
 @bot.callback_query_handler(func=lambda call: True)
 def handle_query(call):
@@ -346,23 +423,19 @@ def handle_query(call):
         pair = call.data.replace("c_", "")
         if pair == "custom":
             user_states[chat_id] = "WAITING_CRYPTO_PAIR"
-            bot.send_message(chat_id, "🔍 Tape le nom de la paire à analyser (ex: `PEPEUSDT`, `ADAUSDT`) :")
+            bot.send_message(chat_id, "🔍 Tapez le nom de la paire (ex: `ADAUSDT`) :")
         else:
-            bot.answer_callback_query(call.id, "Analyse du marché en cours...")
-            bot.send_chat_action(chat_id, "typing")
-            res = analyser_crypto(pair)
-            bot.send_message(chat_id, res)
+            bot.answer_callback_query(call.id, "Analyse en cours...")
+            bot.send_message(chat_id, analyser_crypto(pair))
 
     elif call.data.startswith("bt_"):
         pair = call.data.replace("bt_", "")
         if pair == "custom":
             user_states[chat_id] = "WAITING_BACKTEST_PAIR"
-            bot.send_message(chat_id, "🔍 Tape le nom de la paire pour le backtest (ex: `DOGEUSDT`, `LINKUSDT`) :")
+            bot.send_message(chat_id, "🔍 Tapez le nom de la paire (ex: `DOGEUSDT`) :")
         else:
-            bot.answer_callback_query(call.id, "Calcul du backtest...")
-            bot.send_chat_action(chat_id, "typing")
-            res = executer_backtest(pair)
-            bot.send_message(chat_id, res)
+            bot.answer_callback_query(call.id, "Backtest en cours...")
+            bot.send_message(chat_id, executer_backtest(pair))
 
 
 @bot.message_handler(func=lambda msg: not msg.text.startswith('/'))
@@ -377,43 +450,41 @@ def handle_text_messages(msg):
 
         user_states[chat_id] = None
         cleaned_text = msg.text.replace(" ", "").replace(",", ".").strip()
+
         try:
             capital = float(cleaned_text)
+            if capital <= 0:
+                bot.send_message(chat_id, "❌ Le capital doit être supérieur à zero.")
+                return
+
             mise = capital * 0.02
             res = (
                 f"💼 **CALCUL DE RISQUE (2% STRICT)**\n\n"
-                f"💵 **Capital indiqué :** `{capital:,.2f}`\n"
-                f"📊 **Risque autorisé :** `2%`\n"
-                f"🎯 **Mise maximale recommandée :** `{mise:,.2f}`"
+                f"💵 **Capital :** `{capital:,.2f}`\n"
+                f"🎯 **Mise max recommandée :** `{mise:,.2f}`"
                 f"{WARN}"
             )
             bot.send_message(chat_id, res)
         except ValueError:
-            bot.send_message(chat_id, "❌ Veuillez entrer un nombre valide (ex: `100000`). Tapez `/bankroll` pour recommencer.")
+            bot.send_message(chat_id, "❌ Nombre invalide. Réessayez avec `/bankroll`.")
 
     elif state == "WAITING_CRYPTO_PAIR":
         if not check_rate_limit(user_id):
             return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
-
         user_states[chat_id] = None
-        bot.send_chat_action(chat_id, "typing")
-        res = analyser_crypto(msg.text.strip())
-        bot.send_message(chat_id, res)
+        bot.send_message(chat_id, analyser_crypto(msg.text.strip()))
 
     elif state == "WAITING_BACKTEST_PAIR":
         if not check_rate_limit(user_id):
             return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
-
         user_states[chat_id] = None
-        bot.send_chat_action(chat_id, "typing")
-        res = executer_backtest(msg.text.strip())
-        bot.send_message(chat_id, res)
+        bot.send_message(chat_id, executer_backtest(msg.text.strip()))
 
 
 # ---------------------------------------------------------
-# 7. LANCEMENT
+# 9. DÉMARRAGE
 # ---------------------------------------------------------
 if __name__ == "__main__":
     keep_alive()
-    print("🤖 Bot démarré avec succès !")
+    print("🤖 Bot sécurisé prêt !")
     bot.infinity_polling(none_stop=True)
