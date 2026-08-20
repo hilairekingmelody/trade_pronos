@@ -55,3 +55,4 @@ __pycache__/
 venv/
 .env
 .python-version
+bot_database.db
