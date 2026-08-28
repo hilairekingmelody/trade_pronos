@@ -61,8 +61,19 @@ user_last_request_time = {}
 ANTI_SPAM_DELAY = 3.0
 DAILY_LIMIT_FREE = 5
 
-# Catalogues de données (Affiliation mise à jour & 8 Ebooks)
+# Catalogues de données (Affiliation avec 1xBet & 8 Ebooks)
 AFFILIATES = {
+    "1xbet": {
+        "name": "1xBet — Paris Sportifs",
+        "link": "https://reffpa.com/L?tag=d_5087549m_1573c_whatsapp&site=5087549&ad=1573",
+        "promo": "HILAIREBET",
+        "desc": (
+            "🔴 **1XBET — PARIS SPORTIFS**\n\n"
+            "Profitez de jusqu'à **200% de bonus** sur votre premier dépôt !\n\n"
+            "👉 **Lien d'inscription :** [Cliquez ici pour vous inscrire](https://reffpa.com/L?tag=d_5087549m_1573c_whatsapp&site=5087549&ad=1573)\n"
+            "🔑 **Code Promo Exclusif :** `HILAIREBET`"
+        ),
+    },
     "melbet": {
         "name": "MelBet — Paris Sportifs",
         "link": "https://refpa3665.com/L?tag=d_5997062m_53523c_whatsapp&site=5997062&ad=53523",
@@ -80,7 +91,7 @@ AFFILIATES = {
         "promo": "395vyusacl",
         "desc": (
             "🟡 **EXNESS — FOREX & TRADING**\n\n"
-            "Plateforme de trading ultra-rapide avec spreds réduits.\n\n"
+            "Plateforme de trading ultra-rapide avec spreads réduits.\n\n"
             "👉 **Lien d'inscription :** [Cliquez ici pour vous inscrire](https://one.exnessonelink.com/a/395vyusacl)\n"
             "🔑 **Code Partenaire :** `395vyusacl`"
         ),
@@ -103,6 +114,8 @@ LEAGUES = {
     "PD": {"id": "2014", "name": "La Liga (Espagne)"},
     "FL1": {"id": "2015", "name": "Ligue 1 (France)"},
     "PL": {"id": "2021", "name": "Premier League (Angleterre)"},
+    "BL1": {"id": "2002", "name": "Bundesliga (Allemagne)"},
+    "SA": {"id": "2019", "name": "Serie A (Italie)"},
     "WC": {"id": "2000", "name": "Coupe du Monde / CAN"},
 }
 
@@ -159,8 +172,8 @@ EBOOKS = {
     "stoi1": {
         "title": "Devenir Stoïque",
         "file_name": "stoique1.pdf",
-        "stars": 150,
-        "price_usd": "3$",
+        "stars": 250,
+        "price_usd": "5$",
         "summary": "🏛️ **Devenir Stoïque**\nApprenez à développer une résilience mentale inébranlable au quotidien.",
     },
 }
@@ -453,7 +466,6 @@ def analyser_crypto(pair):
         elif price < ema20 < ema50:
             score -= 2
 
-        # Calcul des objectifs pour débutants
         if score >= 1:
             direction = "LONG / ACHAT"
             entry_low = price * 0.998
@@ -597,10 +609,9 @@ def obtenir_analyses_matchs_par_ligue(league_code):
 # 7. WORKER DE NOTIFICATION AUTOMATIQUE (BTC & ETH)
 # ---------------------------------------------------------
 def background_signal_notifier():
-    """Vérifie automatiquement les signaux forts sur BTC et ETH."""
     while True:
         try:
-            time.sleep(900)  # Scan toutes les 15 minutes
+            time.sleep(900)
             for pair in ["BTCUSDT", "ETHUSDT"]:
                 success, text, copy_text = analyser_crypto(pair)
                 if success and ("90%" in text or "95%" in text):
@@ -616,7 +627,7 @@ def background_signal_notifier():
                                 markup.add(
                                     InlineKeyboardButton(
                                         "📋 Copier le signal",
-                                        callback_data=f"cp_{copy_text[:40]}",
+                                        callback_data=f"cp_{pair}",
                                     )
                                 )
                             bot.send_message(
@@ -631,7 +642,7 @@ def background_signal_notifier():
 
 
 # ---------------------------------------------------------
-# 8. COMMANDES LIBRES (TOUJOURS EXCLUES DU QUOTA)
+# 8. COMMANDES LIBRES
 # ---------------------------------------------------------
 @bot.message_handler(commands=["start"])
 def send_welcome(msg):
@@ -654,7 +665,6 @@ def send_help(msg):
         "📈 `/crypto` : Signaux trading détaillés (TP, SL, Risque)\n"
         "📉 `/backtest` : Simulation stratégie 500 bougies\n"
         "⚽ `/pari` : Pronostics football par compétitions\n"
-        "💰 `/bankroll` : Gestion de capital 2%\n"
         "⭐ `/vip` : Pass VIP 30 jours illimités\n"
         "🤝 `/affiliation` : Codes promo et liens partenaires\n"
         "📚 `/ebooks` : 8 Formations PDF disponibles\n"
@@ -794,11 +804,13 @@ def handle_paris_menu(msg):
         InlineKeyboardButton("🇪🇸 La Liga (Espagne)", callback_data="lg_PD"),
         InlineKeyboardButton("🇫🇷 Ligue 1 (France)", callback_data="lg_FL1"),
         InlineKeyboardButton("🇬🇧 Premier League (Angleterre)", callback_data="lg_PL"),
+        InlineKeyboardButton("🇩🇪 Bundesliga (Allemagne)", callback_data="lg_BL1"),
+        InlineKeyboardButton("🇮🇹 Serie A (Italie)", callback_data="lg_SA"),
         InlineKeyboardButton("🌍 CAN / Coupe du Monde", callback_data="lg_WC"),
     )
     bot.reply_to(
         msg,
-        "⚽ **PRONOSTICS SPORTIFS — CHOISIEZ UNE COMPÉTITION**\n\nSélectionnez une ligue pour consulter tous les matchs prévus :",
+        "⚽ **PRONOSTICS SPORTIFS — CHOISISSEZ UNE COMPÉTITION**\n\nSélectionnez une ligue pour consulter tous les matchs prévus :",
         reply_markup=markup,
     )
 
@@ -856,25 +868,6 @@ def command_backtest(msg):
         msg,
         "📉 **BACKTEST STRATÉGIE**\n\nSélectionnez une paire :",
         reply_markup=markup,
-    )
-
-
-@bot.message_handler(commands=["bankroll"])
-def bankroll_start(msg):
-    if not check_rate_limit(msg.from_user.id):
-        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
-
-    allowed, status_str, count = check_user_status(msg.from_user.id)
-    if not allowed:
-        return bot.reply_to(
-            msg,
-            "❌ **Quota Quotidien Atteint (5/5) !**\n\nVous avez consommé vos 5 requêtes gratuites du jour.\n👉 Tapez `/vip` pour vous abonner et débloquer l'accès **ILLIMITÉ** !",
-        )
-
-    user_states[msg.chat.id] = "WAITING_BANKROLL"
-    bot.reply_to(
-        msg,
-        "💰 **GESTION DE CAPITAL (2%)**\n\nEntrez votre capital total (ex: `5000`) :",
     )
 
 
@@ -970,7 +963,7 @@ def handle_copy_signal(call):
         bot.answer_callback_query(call.id, "Signal copié !", show_alert=False)
         bot.send_message(
             call.message.chat.id,
-            f"📋 **SIGNAL PRÊT À COLLER :**\n\n`{copy_text}`\n\n*Copiez et collez ce texte dans Binance, Bybit ou MetaTrader.*",
+            f"📋 **SIGNAL PRÊT À COLLER :**\n\n`{copy_text}`\n\nCopiez et collez ce texte dans Exness ou KuCoin.",
         )
     else:
         bot.answer_callback_query(
@@ -1224,36 +1217,7 @@ def handle_text_messages(msg):
     if not check_rate_limit(user_id):
         return bot.reply_to(msg, "⏳ *Anti-Spam :* Veuillez patienter 3 secondes.")
 
-    if state == "WAITING_BANKROLL":
-        cleaned_text = msg.text.replace(" ", "").replace(",", ".").strip()
-        try:
-            capital = float(cleaned_text)
-            if capital <= 0 or capital > 100_000_000 or capital != capital:
-                bot.send_message(
-                    chat_id,
-                    "❌ **Montant invalide.** Le capital doit être un nombre positif raisonnable.",
-                )
-                return
-
-            consumed, quota_info = check_and_consume_request_atomic(user_id)
-            user_states[chat_id] = None
-
-            mise = capital * 0.02
-            res = (
-                f"💼 **CALCUL DE RISQUE (2% STRICT)**\n\n"
-                f"💵 **Capital :** `{capital:,.2f} $`\n"
-                f"🎯 **Mise max recommandée :** `{mise:,.2f} $`\n\n"
-                f"📊 *Consommation :* `{quota_info}`"
-                f"{WARN}"
-            )
-            bot.send_message(chat_id, res)
-        except ValueError:
-            bot.send_message(
-                chat_id,
-                "❌ Nombre invalide. Entrez un chiffre pur (ex: 5000).",
-            )
-
-    elif state == "WAITING_CRYPTO_PAIR":
+    if state == "WAITING_CRYPTO_PAIR":
         success, res_text, copy_text = analyser_crypto(msg.text.strip())
         if success:
             consumed, quota_info = check_and_consume_request_atomic(user_id)
@@ -1287,13 +1251,12 @@ def handle_text_messages(msg):
 
 
 # ---------------------------------------------------------
-# 13. DÉMARRAGE DU BOT (WORKER NOTIFICATION + POLLING)
+# 13. DÉMARRAGE DU BOT
 # ---------------------------------------------------------
 if __name__ == "__main__":
     keep_alive()
-    logger.info("Démarrage du bot v4.0 (Version Supérieure)...")
+    logger.info("Démarrage du bot v4.0...")
 
-    # Démarrage du thread d'arrière-plan pour les notifications automatiques
     t_notify = Thread(target=background_signal_notifier)
     t_notify.daemon = True
     t_notify.start()
