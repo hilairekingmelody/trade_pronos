@@ -52,9 +52,18 @@ if not TOKEN:
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 WARN = "\n\n⚠️ *Attention :* Gestion du risque obligatoire. Interdit aux -18 ans."
 
-# Textes de Cross-Selling Automatiques
-CROSS_SELL_CRYPTO = "\n\n💡 *Exécutez ce trade avec -10% de frais sur notre exchange partenaire : Tapez /affiliation*"
-CROSS_SELL_FOOT = "\n\n🎁 *Profitez de 200% de bonus pour parier sur ces matchs : Tapez /affiliation*"
+# Textes de Cross-Selling Automatiques intégrés avec Liens & Codes Promo
+CROSS_SELL_CRYPTO = (
+    "\n\n🤖 **COPY TRADING AUTOMATIQUE :**\n"
+    "• 🟡 [S'inscrire sur Exness](https://one.exnessonelink.com/a/395vyusacl) (Code Partenaire : `395vyusacl`)\n"
+    "• 🟢 [S'inscrire sur KuCoin](https://www.kucoin.com/ucenter/signup?&rcode=rEN8V1E&utm_medium=U17710) (Code Parrain : `rEN8V1E`)"
+)
+
+CROSS_SELL_FOOT = (
+    "\n\n🎁 **COUPON DU JOUR & BONUS (200%) :**\n"
+    "• 🔴 [Parier sur 1xBet](https://reffpa.com/L?tag=d_5087549m_1573c_whatsapp&site=5087549&ad=1573) (Code Promo : `HILAIREBET`)\n"
+    "• 🔵 [Parier sur MelBet](https://refpa3665.com/L?tag=d_5997062m_53523c_whatsapp&site=5997062&ad=53523) (Code Promo : `HILAIREBET`)"
+)
 
 user_states = {}
 user_last_request_time = {}
@@ -425,7 +434,7 @@ def requete_binance_securisee(url_path):
 def analyser_crypto(pair):
     pair_clean = sanitize_symbol(pair)
     if not pair_clean:
-        return False, "❌ Symbole invalide. Exemple valide : `BTCUSDT`.", None
+        return False, "❌ Symbole invalide. Exemple valide : `BTCUSDT`."
 
     url_path = f"/api/v3/klines?symbol={pair_clean}&interval=15m&limit=100"
     data = requete_binance_securisee(url_path)
@@ -434,7 +443,6 @@ def analyser_crypto(pair):
         return (
             False,
             f"❌ Paire `{pair_clean}` introuvable ou indisponible actuellement.",
-            None,
         )
 
     try:
@@ -504,12 +512,11 @@ def analyser_crypto(pair):
             f"{WARN}"
         )
 
-        copy_text = f"{pair_clean} {direction.split()[0]} Entry: {entry_low:.2f} TP: {tp1:.2f} SL: {sl:.2f}"
-        return True, res, copy_text
+        return True, res
 
     except Exception as e:
         logger.error(f"Erreur analyse crypto : {e}")
-        return False, "❌ Erreur de calcul des indicateurs.", None
+        return False, "❌ Erreur de calcul des indicateurs."
 
 
 def executer_backtest(pair):
@@ -585,13 +592,11 @@ def obtenir_analyses_matchs_par_ligue(league_code):
             equipe_ext = match["awayTeam"]["name"]
             utc_date = match["utcDate"][:10]
 
-            # Calcul dynamique basique des probabilités
             match_id_hash = hash(f"{equipe_dom}_{equipe_ext}")
-            pct_dom = 40 + (match_id_hash % 21)       # Entre 40% et 60%
-            pct_nul = 15 + ((match_id_hash >> 2) % 11)  # Entre 15% et 25%
+            pct_dom = 40 + (match_id_hash % 21)
+            pct_nul = 15 + ((match_id_hash >> 2) % 11)
             pct_ext = 100 - (pct_dom + pct_nul)
 
-            # Ajustement du pronostic selon l'équipe favorite
             if pct_dom >= pct_ext:
                 prono = f"Victoire ou Nul {equipe_dom} / Plus de 1.5 buts"
             else:
@@ -616,7 +621,7 @@ def background_signal_notifier():
         try:
             time.sleep(900)
             for pair in ["BTCUSDT", "ETHUSDT"]:
-                success, text, copy_text = analyser_crypto(pair)
+                success, text = analyser_crypto(pair)
                 if success and ("90%" in text or "95%" in text):
                     with get_db_connection() as conn:
                         cursor = conn.cursor()
@@ -625,18 +630,9 @@ def background_signal_notifier():
 
                     for user in users:
                         try:
-                            markup = InlineKeyboardMarkup()
-                            if copy_text:
-                                markup.add(
-                                    InlineKeyboardButton(
-                                        "📋 Copier le signal",
-                                        callback_data=f"cp_{pair}",
-                                    )
-                                )
                             bot.send_message(
                                 user["user_id"],
                                 f"🚨 **ALERTE SIGNAL FORT EN TEMPS RÉEL**\n\n{text}",
-                                reply_markup=markup,
                             )
                         except Exception:
                             continue
@@ -656,22 +652,6 @@ def send_welcome(msg):
         "⭐ **Pass VIP (30 Jours) :** Accès illimité 24/7 ! Tapez ` /vip `.\n"
         "🤝 **Partenaires :** Offres exclusives via ` /affiliation `.\n"
         "📚 **Formations :** Découvrez nos 8 Ebooks via ` /ebooks `."
-    )
-    bot.reply_to(msg, text)
-
-
-@bot.message_handler(commands=["help", "cmds"])
-def send_help(msg):
-    user_states[msg.chat.id] = None
-    text = (
-        "🤖 **MegaBot Trading & Sport v4.0**\n\n"
-        "📈 ` /crypto ` : Signaux trading détaillés (TP, SL, Risque)\n"
-        "📉 ` /backtest ` : Simulation stratégie 500 bougies\n"
-        "⚽ ` /pari ` : Pronostics football par compétitions\n"
-        "⭐ ` /vip ` : Pass VIP 30 jours illimités\n"
-        "🤝 ` /affiliation ` : Codes promo et liens partenaires\n"
-        "📚 ` /ebooks ` : 8 Formations PDF disponibles\n"
-        f"{WARN}"
     )
     bot.reply_to(msg, text)
 
@@ -875,7 +855,7 @@ def command_backtest(msg):
 
 
 # ---------------------------------------------------------
-# 10. CALLBACKS & GESTION DES LIGUES ET DU COPY TRADING
+# 10. CALLBACKS & GESTION DES LIGUES
 # ---------------------------------------------------------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("lg_"))
 def handle_league_callbacks(call):
@@ -937,41 +917,16 @@ def handle_crypto_callbacks(call):
         return
 
     bot.answer_callback_query(call.id, "Analyse en cours...")
-    success, res_text, copy_text = analyser_crypto(pair)
+    success, res_text = analyser_crypto(pair)
 
     if success:
         consumed, quota_info = check_and_consume_request_atomic(user_id)
-        markup = InlineKeyboardMarkup()
-        if copy_text:
-            markup.add(
-                InlineKeyboardButton(
-                    "📋 Copier le signal", callback_data=f"cp_{pair}"
-                )
-            )
-
         bot.send_message(
             chat_id,
             f"{res_text}\n\n📊 *Consommation :* `{quota_info}`",
-            reply_markup=markup,
         )
     else:
         bot.send_message(chat_id, res_text)
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("cp_"))
-def handle_copy_signal(call):
-    pair = call.data.replace("cp_", "")
-    success, res_text, copy_text = analyser_crypto(pair)
-    if success and copy_text:
-        bot.answer_callback_query(call.id, "Signal copié !", show_alert=False)
-        bot.send_message(
-            call.message.chat.id,
-            f"📋 **SIGNAL PRÊT À COLLER :**\n\n`{copy_text}`\n\nCopiez et collez ce texte dans Exness ou KuCoin.",
-        )
-    else:
-        bot.answer_callback_query(
-            call.id, "Impossible de copier le signal.", show_alert=True
-        )
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("bt_"))
@@ -1221,22 +1176,13 @@ def handle_text_messages(msg):
         return bot.reply_to(msg, "⏳ *Anti-Spam :* Veuillez patienter 3 secondes.")
 
     if state == "WAITING_CRYPTO_PAIR":
-        success, res_text, copy_text = analyser_crypto(msg.text.strip())
+        success, res_text = analyser_crypto(msg.text.strip())
         if success:
             consumed, quota_info = check_and_consume_request_atomic(user_id)
             user_states[chat_id] = None
-            markup = InlineKeyboardMarkup()
-            if copy_text:
-                markup.add(
-                    InlineKeyboardButton(
-                        "📋 Copier le signal",
-                        callback_data=f"cp_{msg.text.strip().upper()}",
-                    )
-                )
             bot.send_message(
                 chat_id,
                 f"{res_text}\n\n📊 *Consommation :* `{quota_info}`",
-                reply_markup=markup,
             )
         else:
             bot.send_message(chat_id, res_text)
