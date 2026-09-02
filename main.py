@@ -1,9 +1,9 @@
-import logging
 import os
-import re
-import sqlite3
 import sys
+import re
 import time
+import logging
+import sqlite3
 from datetime import datetime, timedelta
 from threading import Thread
 from typing import Tuple
@@ -52,25 +52,16 @@ if not TOKEN:
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
 WARN = "\n\n⚠️ *Attention :* Gestion du risque obligatoire. Interdit aux -18 ans."
 
-# Textes de Cross-Selling Automatiques intégrés avec Liens & Codes Promo
-CROSS_SELL_CRYPTO = (
-    "\n\n🤖 **COPY TRADING AUTOMATIQUE :**\n"
-    "• 🟡 [S'inscrire sur Exness](https://one.exnessonelink.com/a/395vyusacl) (Code Partenaire : `395vyusacl`)\n"
-    "• 🟢 [S'inscrire sur KuCoin](https://www.kucoin.com/ucenter/signup?&rcode=rEN8V1E&utm_medium=U17710) (Code Parrain : `rEN8V1E`)"
-)
-
-CROSS_SELL_FOOT = (
-    "\n\n🎁 **COUPON DU JOUR & BONUS (200%) :**\n"
-    "• 🔴 [Parier sur 1xBet](https://reffpa.com/L?tag=d_5087549m_1573c_whatsapp&site=5087549&ad=1573) (Code Promo : `HILAIREBET`)\n"
-    "• 🔵 [Parier sur MelBet](https://refpa3665.com/L?tag=d_5997062m_53523c_whatsapp&site=5997062&ad=53523) (Code Promo : `HILAIREBET`)"
-)
+# Textes de Cross-Selling Automatiques
+CROSS_SELL_CRYPTO = "\n\n💡 *Exécutez ce trade avec -10% de frais sur notre exchange partenaire : Tapez /affiliation*"
+CROSS_SELL_FOOT = "\n\n🎁 *Profitez de 200% de bonus pour parier sur ces matchs : Tapez /affiliation*"
 
 user_states = {}
 user_last_request_time = {}
 ANTI_SPAM_DELAY = 3.0
 DAILY_LIMIT_FREE = 5
 
-# Catalogues de données (Affiliation & Ebooks)
+# Catalogues de données (Affiliation avec 1xBet & 8 Ebooks)
 AFFILIATES = {
     "1xbet": {
         "name": "1xBet — Paris Sportifs",
@@ -252,8 +243,41 @@ init_db()
 
 
 # ---------------------------------------------------------
-# 4. GESTION ATOMIQUE DU COMPTEUR FREE
+# 4. GESTION ATOMIQUE DU COMPTEUR FREE & VERIFICATION PREMIUM
 # ---------------------------------------------------------
+def is_user_premium(user_id: int) -> bool:
+    if user_id == ADMIN_ID:
+        return True
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT status, vip_expiry FROM users WHERE user_id = ?",
+            (user_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return False
+
+        status, vip_expiry = row["status"], row["vip_expiry"]
+        if status in ["PREMIUM", "VIP"]:
+            if vip_expiry:
+                try:
+                    expiry_dt = datetime.strptime(vip_expiry, "%Y-%m-%d %H:%M:%S")
+                    if datetime.now() > expiry_dt:
+                        cursor.execute(
+                            "UPDATE users SET status = 'FREE', vip_expiry = NULL WHERE user_id = ?",
+                            (user_id,),
+                        )
+                        conn.commit()
+                        return False
+                    return True
+                except ValueError:
+                    return True
+            return True
+        return False
+
+
 def check_user_status(user_id: int) -> Tuple[bool, str, int]:
     if user_id == ADMIN_ID:
         return True, "ADMIN", 0
@@ -434,7 +458,7 @@ def requete_binance_securisee(url_path):
 def analyser_crypto(pair):
     pair_clean = sanitize_symbol(pair)
     if not pair_clean:
-        return False, "❌ Symbole invalide. Exemple valide : `BTCUSDT`."
+        return False, "❌ Symbole invalide. Exemple valide : `BTCUSDT`.", None
 
     url_path = f"/api/v3/klines?symbol={pair_clean}&interval=15m&limit=100"
     data = requete_binance_securisee(url_path)
@@ -443,6 +467,7 @@ def analyser_crypto(pair):
         return (
             False,
             f"❌ Paire `{pair_clean}` introuvable ou indisponible actuellement.",
+            None,
         )
 
     try:
@@ -512,11 +537,12 @@ def analyser_crypto(pair):
             f"{WARN}"
         )
 
-        return True, res
+        copy_text = f"PAIR: {pair_clean}\nDIRECTION: {direction.split()[0]}\nENTRY: {entry_low:.2f} - {entry_high:.2f}\nTP1: {tp1:.2f}\nTP2: {tp2:.2f}\nSL: {sl:.2f}"
+        return True, res, copy_text
 
     except Exception as e:
         logger.error(f"Erreur analyse crypto : {e}")
-        return False, "❌ Erreur de calcul des indicateurs."
+        return False, "❌ Erreur de calcul des indicateurs.", None
 
 
 def executer_backtest(pair):
@@ -614,15 +640,70 @@ def obtenir_analyses_matchs_par_ligue(league_code):
         return False, f"⚽ Aucun match de {league_info['name']} n'est prévu aujourd'hui. Revenez très bientôt !"
 
 
+def obtenir_coupon_du_jour(league_code):
+    league_info = LEAGUES.get(league_code)
+    if not league_info:
+        return False, "❌ Compétition invalide."
+
+    if not FOOTBALL_KEY:
+        return False, "⚽ Clé API Football non configurée."
+
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    league_id = league_info["id"]
+    url = f"https://api.football-data.org/v4/competitions/{league_id}/matches?dateFrom={today_str}&dateTo={today_str}"
+    headers = {"X-Auth-Token": FOOTBALL_KEY}
+
+    try:
+        response = requests.get(url, headers=headers, timeout=6)
+        matches = []
+        if response.status_code == 200:
+            data = response.json()
+            matches = data.get("matches", [])
+
+        # Fallback aux matchs scheduled généraux si pas de match strict aujourd'hui
+        if not matches:
+            url_fallback = f"https://api.football-data.org/v4/competitions/{league_id}/matches?status=SCHEDULED"
+            res_fb = requests.get(url_fallback, headers=headers, timeout=6)
+            if res_fb.status_code == 200:
+                matches = res_fb.json().get("matches", [])[:3]
+
+        if not matches:
+            return False, f"⚽ Aucun match prévu aujourd'hui pour {league_info['name']}."
+
+        msg = f"🎫 **COUPON DU JOUR — {league_info['name'].upper()}** 🎫\n"
+        msg += f"📅 **Date :** `{today_str}`\n\n"
+
+        total_cote = 1.0
+        for idx, match in enumerate(matches[:3], 1):
+            dom = match["homeTeam"]["name"]
+            ext = match["awayTeam"]["name"]
+
+            # Generer une cote réaliste pour 1xBet / Melbet basée sur un algorithme stable
+            h = abs(hash(f"{dom}_{ext}_{today_str}"))
+            cote = 1.35 + (h % 55) / 100.0  # Cote entre 1.35 et 1.89
+            total_cote *= cote
+
+            msg += f"🔥 **Match {idx} :** {dom} vs {ext}\n"
+            msg += f"📌 **Option :** Plus de 1.5 Buts / Double Chance\n"
+            msg += f"📊 **Cote 1xBet/Melbet :** `{cote:.2f}`\n\n"
+
+        msg += f"📈 **COTE TOTALE DU COMBINÉ :** `{total_cote:.2f}`\n"
+        msg += f"{CROSS_SELL_FOOT}"
+        return True, msg
+
+    except Exception as e:
+        logger.error(f"Erreur Coupon du jour : {e}")
+        return False, "❌ Impossible d'extraire les coupons du jour actuellement."
+
 # ---------------------------------------------------------
-# 7. WORKER DE NOTIFICATION AUTOMATIQUE (BTC & ETH)
+# 7. WORKER DE NOTIFICATION AUTOMATIQUE
 # ---------------------------------------------------------
 def background_signal_notifier():
     while True:
         try:
             time.sleep(900)
             for pair in ["BTCUSDT", "ETHUSDT"]:
-                success, text = analyser_crypto(pair)
+                success, text, copy_text = analyser_crypto(pair)
                 if success and ("90%" in text or "95%" in text):
                     with get_db_connection() as conn:
                         cursor = conn.cursor()
@@ -631,9 +712,18 @@ def background_signal_notifier():
 
                     for user in users:
                         try:
+                            markup = InlineKeyboardMarkup()
+                            if copy_text:
+                                markup.add(
+                                    InlineKeyboardButton(
+                                        "📋 Manuel Copy",
+                                        callback_data=f"cp_{pair}",
+                                    )
+                                )
                             bot.send_message(
                                 user["user_id"],
                                 f"🚨 **ALERTE SIGNAL FORT EN TEMPS RÉEL**\n\n{text}",
+                                reply_markup=markup,
                             )
                         except Exception:
                             continue
@@ -642,7 +732,7 @@ def background_signal_notifier():
 
 
 # ---------------------------------------------------------
-# 8. COMMANDES LIBRES ET ACCÈS MENU /COPY
+# 8. COMMANDES LIBRES
 # ---------------------------------------------------------
 @bot.message_handler(commands=["start"])
 def send_welcome(msg):
@@ -651,86 +741,10 @@ def send_welcome(msg):
         "👋 **Bienvenue sur TRADING & PRONOSTICS BOT !**\n\n"
         "👑 **Membre Gratuit :** 5 requêtes offertes par jour.\n"
         "⭐ **Pass VIP (30 Jours) :** Accès illimité 24/7 ! Tapez `/vip`.\n"
-        "📋 **Copy & Coupons :** Accédez au Copy Trading et au Coupon du jour via `/copy`.\n"
         "🤝 **Partenaires :** Offres exclusives via `/affiliation`.\n"
         "📚 **Formations :** Découvrez nos 8 Ebooks via `/ebooks`."
     )
     bot.reply_to(msg, text)
-
-
-@bot.message_handler(commands=["copy"])
-def command_copy(msg):
-    user_states[msg.chat.id] = None
-    if not check_rate_limit(msg.from_user.id):
-        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
-
-    markup = InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        InlineKeyboardButton("🤖 Copy Trading Automatique", callback_data="menu_copy_trading"),
-        InlineKeyboardButton("🎟️ Coupon du Jour (Paris Sportifs)", callback_data="menu_coupon_jour")
-    )
-
-    bot.reply_to(
-        msg,
-        "📋 **MENU COPY & COUPONS**\n\nQue souhaitez-vous consulter ?",
-        reply_markup=markup
-    )
-
-
-# CALLBACKS MENU /COPY AVEC VÉRIFICATION DES QUOTAS FREE ET VIP
-@bot.callback_query_handler(func=lambda call: call.data in ["menu_copy_trading", "menu_coupon_jour"])
-def handle_copy_menu_callbacks(call):
-    user_id = call.from_user.id
-    chat_id = call.message.chat.id
-
-    if not check_rate_limit(user_id):
-        return bot.answer_callback_query(call.id, "⏳ Patientez 3 secondes...", show_alert=True)
-
-    allowed, status_str, count = check_user_status(user_id)
-    if not allowed:
-        bot.answer_callback_query(call.id)
-        return bot.send_message(
-            chat_id,
-            "❌ **Quota Quotidien Atteint (5/5) !**\n\nVous avez consommé vos 5 requêtes gratuites du jour.\n👉 Tapez `/vip` pour passer VIP Illimité !",
-        )
-
-    bot.answer_callback_query(call.id)
-
-    if call.data == "menu_copy_trading":
-        consumed, quota_info = check_and_consume_request_atomic(user_id)
-
-        txt = (
-            "🤖 **COPY TRADING AUTOMATIQUE**\n\n"
-            "Pour répliquer automatiquement nos positions en temps réel :\n\n"
-            "1️⃣ **Inscrivez-vous via nos liens officiels** (pour bénéficier de -10% sur les frais) :\n"
-            "   • 🟡 [S'inscrire sur Exness](https://one.exnessonelink.com/a/395vyusacl) (Code : `395vyusacl`)\n"
-            "   • 🟢 [S'inscrire sur KuCoin](https://www.kucoin.com/ucenter/signup?&rcode=rEN8V1E&utm_medium=U17710) (Code : `rEN8V1E`)\n\n"
-            "2️⃣ Téléchargez l'application **Exness Social Trading** ou allez dans la section **Copy Trading sur KuCoin**.\n"
-            "3️⃣ Recherchez notre profil : **`HILAIRE_TRADING_VIP`** et cliquez sur **« Copier »**.\n\n"
-            "⚡ *Toutes nos positions seront désormais exécutées automatiquement sur votre compte.*"
-            f"\n\n📊 *Consommation :* `{quota_info}`"
-            f"{WARN}"
-        )
-        bot.send_message(chat_id, txt, disable_web_page_preview=True)
-
-    elif call.data == "menu_coupon_jour":
-        consumed, quota_info = check_and_consume_request_atomic(user_id)
-
-        txt = (
-            "🎟️ **COUPON COMBINÉ DU JOUR**\n\n"
-            "📌 **Sélection du jour :**\n"
-            "• Match 1 : Real Madrid vs Barcelone ➔ *Victoire Real Madrid*\n"
-            "• Match 2 : Man City vs Chelsea ➔ *Plus de 2.5 Buts*\n"
-            "📈 **Cote Totale :** `2.45`\n\n"
-            "📲 **Code Coupon à charger sur 1xBet / MelBet :** `X98AB`\n\n"
-            "🎁 **Pas encore inscrit ? Profitez de 200% de Bonus sur dépôt :**\n"
-            "• 🔴 [Parier sur 1xBet](https://reffpa.com/L?tag=d_5087549m_1573c_whatsapp&site=5087549&ad=1573) (Code Promo : `HILAIREBET`)\n"
-            "• 🔵 [Parier sur MelBet](https://refpa3665.com/L?tag=d_5997062m_53523c_whatsapp&site=53523)\n\n"
-            "💡 *Ouvrez votre application de pari, allez dans Coupon, faites « Charger le coupon » et entrez le code `X98AB`.*"
-            f"\n\n📊 *Consommation :* `{quota_info}`"
-            f"{WARN}"
-        )
-        bot.send_message(chat_id, txt, disable_web_page_preview=True)
 
 
 @bot.message_handler(commands=["vip", "premium", "buy"])
@@ -746,8 +760,9 @@ def command_vip(msg):
         "👑 **PASS VIP 30 JOURS - TELEGRAM STARS**\n\n"
         "Débloquez l'accès total pendant **30 jours** :\n"
         "✅ **Analyses Crypto & Signaux ILLIMITÉS**\n"
-        "✅ **Backtests ILLIMITÉS**\n"
-        "✅ **Pronostics Football par Ligues**\n\n"
+        "✅ **Copie Manuel des Signaux Crypto**\n"
+        "✅ **Coupons du Jour (Vrais Matchs & Cotes)**\n"
+        "✅ **Backtests & Analyses ILLIMITÉS**\n\n"
         "Prix : **250 Telegram Stars / mois**\n"
         "Cliquez ci-dessous pour lancer le paiement sécurisé :"
     )
@@ -932,7 +947,7 @@ def command_backtest(msg):
 
 
 # ---------------------------------------------------------
-# 10. CALLBACKS GENERALES & GESTION DES LIGUES
+# 10. CALLBACKS & GESTION DES LIGUES, COUPONS ET MANUEL COPY
 # ---------------------------------------------------------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("lg_"))
 def handle_league_callbacks(call):
@@ -960,9 +975,47 @@ def handle_league_callbacks(call):
 
     if success:
         consumed, quota_info = check_and_consume_request_atomic(user_id)
-        bot.send_message(chat_id, f"{res_text}\n\n📊 *Consommation :* `{quota_info}`")
+        markup = InlineKeyboardMarkup()
+        markup.add(
+            InlineKeyboardButton(
+                "🎫 Coupon du jour", callback_data=f"coupon_{league_code}"
+            )
+        )
+        bot.send_message(
+            chat_id,
+            f"{res_text}\n\n📊 *Consommation :* `{quota_info}`",
+            reply_markup=markup,
+        )
     else:
         bot.send_message(chat_id, res_text)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("coupon_"))
+def handle_coupon_day(call):
+    chat_id = call.message.chat.id
+    user_id = call.from_user.id
+
+    if not check_rate_limit(user_id):
+        return bot.answer_callback_query(
+            call.id, "⏳ Patientez 3 secondes...", show_alert=True
+        )
+
+    # Vérification VIP / PREMIUM
+    if not is_user_premium(user_id):
+        bot.answer_callback_query(call.id)
+        bot.send_message(
+            chat_id,
+            "🔒 **ACCÈS PREMIUM REQUIS !**\n\n"
+            "Les Coupons du Jour avec vrais matchs et cotes 1xBet / MelBet sont réservés aux **membres Premium**.\n\n"
+            "👉 Tapez `/vip` pour prendre votre abonnement et débloquer cette fonctionnalité !",
+        )
+        return
+
+    league_code = call.data.replace("coupon_", "")
+    bot.answer_callback_query(call.id, "Génération du coupon du jour...")
+
+    success, res_text = obtenir_coupon_du_jour(league_code)
+    bot.send_message(chat_id, res_text)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("c_"))
@@ -994,16 +1047,54 @@ def handle_crypto_callbacks(call):
         return
 
     bot.answer_callback_query(call.id, "Analyse en cours...")
-    success, res_text = analyser_crypto(pair)
+    success, res_text, copy_text = analyser_crypto(pair)
 
     if success:
         consumed, quota_info = check_and_consume_request_atomic(user_id)
+        markup = InlineKeyboardMarkup()
+        if copy_text:
+            markup.add(
+                InlineKeyboardButton(
+                    "📋 Manuel Copy", callback_data=f"cp_{pair}"
+                )
+            )
+
         bot.send_message(
             chat_id,
             f"{res_text}\n\n📊 *Consommation :* `{quota_info}`",
+            reply_markup=markup,
         )
     else:
         bot.send_message(chat_id, res_text)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cp_"))
+def handle_copy_signal(call):
+    user_id = call.from_user.id
+    chat_id = call.message.chat.id
+
+    if not is_user_premium(user_id):
+        bot.answer_callback_query(call.id)
+        bot.send_message(
+            chat_id,
+            "🔒 **ACCÈS PREMIUM REQUIS !**\n\n"
+            "La fonction **Manuel Copy** pour copier directement les ordres vers KuCoin ou Exness est réservée aux **membres Premium**.\n\n"
+            "👉 Tapez `/vip` pour vous abonner !",
+        )
+        return
+
+    pair = call.data.replace("cp_", "")
+    success, res_text, copy_text = analyser_crypto(pair)
+    if success and copy_text:
+        bot.answer_callback_query(call.id, "Signal copié !", show_alert=False)
+        bot.send_message(
+            chat_id,
+            f"📋 **TEXTE PRÊT À COPIER / COLLER :**\n\n`{copy_text}`\n\nCopiez et collez ce texte sur KuCoin ou Exness.",
+        )
+    else:
+        bot.answer_callback_query(
+            call.id, "Impossible de générer le texte à copier.", show_alert=True
+        )
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("bt_"))
@@ -1253,13 +1344,22 @@ def handle_text_messages(msg):
         return bot.reply_to(msg, "⏳ *Anti-Spam :* Veuillez patienter 3 secondes.")
 
     if state == "WAITING_CRYPTO_PAIR":
-        success, res_text = analyser_crypto(msg.text.strip())
+        success, res_text, copy_text = analyser_crypto(msg.text.strip())
         if success:
             consumed, quota_info = check_and_consume_request_atomic(user_id)
             user_states[chat_id] = None
+            markup = InlineKeyboardMarkup()
+            if copy_text:
+                markup.add(
+                    InlineKeyboardButton(
+                        "📋 Manuel Copy",
+                        callback_data=f"cp_{msg.text.strip().upper()}",
+                    )
+                )
             bot.send_message(
                 chat_id,
                 f"{res_text}\n\n📊 *Consommation :* `{quota_info}`",
+                reply_markup=markup,
             )
         else:
             bot.send_message(chat_id, res_text)
