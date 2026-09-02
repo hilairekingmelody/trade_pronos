@@ -1,9 +1,9 @@
-import os
-import sys
-import re
-import time
 import logging
+import os
+import re
 import sqlite3
+import sys
+import time
 from datetime import datetime, timedelta
 from threading import Thread
 from typing import Tuple
@@ -70,7 +70,7 @@ user_last_request_time = {}
 ANTI_SPAM_DELAY = 3.0
 DAILY_LIMIT_FREE = 5
 
-# Catalogues de données (Affiliation avec 1xBet & 8 Ebooks)
+# Catalogues de données (Affiliation & Ebooks)
 AFFILIATES = {
     "1xbet": {
         "name": "1xBet — Paris Sportifs",
@@ -613,6 +613,7 @@ def obtenir_analyses_matchs_par_ligue(league_code):
         logger.error(f"Erreur Football API : {e}")
         return False, f"⚽ Aucun match de {league_info['name']} n'est prévu aujourd'hui. Revenez très bientôt !"
 
+
 # ---------------------------------------------------------
 # 7. WORKER DE NOTIFICATION AUTOMATIQUE (BTC & ETH)
 # ---------------------------------------------------------
@@ -649,11 +650,66 @@ def send_welcome(msg):
     text = (
         "👋 **Bienvenue sur TRADING & PRONOSTICS BOT !**\n\n"
         "👑 **Membre Gratuit :** 5 requêtes offertes par jour.\n"
-        "⭐ **Pass VIP (30 Jours) :** Accès illimité 24/7 ! Tapez ` /vip `.\n"
-        "🤝 **Partenaires :** Offres exclusives via ` /affiliation `.\n"
-        "📚 **Formations :** Découvrez nos 8 Ebooks via ` /ebooks `."
+        "⭐ **Pass VIP (30 Jours) :** Accès illimité 24/7 ! Tapez `/vip`.\n"
+        "📋 **Copy & Coupons :** Accédez au Copy Trading et au Coupon du jour via `/copy`.\n"
+        "🤝 **Partenaires :** Offres exclusives via `/affiliation`.\n"
+        "📚 **Formations :** Découvrez nos 8 Ebooks via `/ebooks`."
     )
     bot.reply_to(msg, text)
+
+
+# ---------------------------------------------------------
+# COMMANDE /COPY ET SES CALLBACKS (COPY TRADING & COUPON DU JOUR)
+# ---------------------------------------------------------
+@bot.message_handler(commands=["copy"])
+def command_copy(msg):
+    user_states[msg.chat.id] = None
+    if not check_rate_limit(msg.from_user.id):
+        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
+
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("🤖 Copy Trading Automatique", callback_data="menu_copy_trading"),
+        InlineKeyboardButton("🎟️ Coupon du Jour (Paris Sportifs)", callback_data="menu_coupon_jour")
+    )
+
+    bot.reply_to(
+        msg,
+        "📋 **MENU COPY & COUPONS**\n\nQue souhaitez-vous consulter ?",
+        reply_markup=markup
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data in ["menu_copy_trading", "menu_coupon_jour"])
+def handle_copy_menu_callbacks(call):
+    if not check_rate_limit(call.from_user.id):
+        return bot.answer_callback_query(call.id, "⏳ Patientez 3 secondes...", show_alert=True)
+
+    bot.answer_callback_query(call.id)
+
+    if call.data == "menu_copy_trading":
+        txt = (
+            "🤖 **COPY TRADING AUTOMATIQUE**\n\n"
+            "Rejoignez nos comptes de Copy Trading et répliquez automatiquement nos positions :\n\n"
+            "• 🟡 [S'inscrire sur Exness](https://one.exnessonelink.com/a/395vyusacl)\n"
+            "   🔑 **Code Partenaire :** `395vyusacl`\n\n"
+            "• 🟢 [S'inscrire sur KuCoin](https://www.kucoin.com/ucenter/signup?&rcode=rEN8V1E&utm_medium=U17710)\n"
+            "   🔑 **Code Parrain :** `rEN8V1E`"
+            f"{WARN}"
+        )
+        bot.send_message(call.message.chat.id, txt, disable_web_page_preview=True)
+
+    elif call.data == "menu_coupon_jour":
+        txt = (
+            "🎟️ **COUPON DU JOUR & BONUS DE DÉPÔT (200%)**\n\n"
+            "Utilisez nos liens et codes promos pour recevoir votre bonus et suivre nos coupons :\n\n"
+            "• 🔴 [Parier sur 1xBet](https://reffpa.com/L?tag=d_5087549m_1573c_whatsapp&site=5087549&ad=1573)\n"
+            "   🔑 **Code Promo Exclusif :** `HILAIREBET`\n\n"
+            "• 🔵 [Parier sur MelBet](https://refpa3665.com/L?tag=d_5997062m_53523c_whatsapp&site=5997062&ad=53523)\n"
+            "   🔑 **Code Promo Exclusif :** `HILAIREBET`"
+            f"{WARN}"
+        )
+        bot.send_message(call.message.chat.id, txt, disable_web_page_preview=True)
 
 
 @bot.message_handler(commands=["vip", "premium", "buy"])
