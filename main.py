@@ -408,7 +408,7 @@ def sanitize_symbol(symbol: str) -> str:
 
 
 # ---------------------------------------------------------
-# 6. ENGINS DE TRAITEMENT (Crypto Approfondi, Backtest, Football par Ligue)
+# 6. ENGINS DE TRAITEMENT (Crypto, Backtest, Football)
 # ---------------------------------------------------------
 def requete_binance_securisee(url_path):
     domaines = [
@@ -642,7 +642,7 @@ def background_signal_notifier():
 
 
 # ---------------------------------------------------------
-# 8. COMMANDES LIBRES
+# 8. COMMANDES LIBRES ET ACCÈS MENU /COPY
 # ---------------------------------------------------------
 @bot.message_handler(commands=["start"])
 def send_welcome(msg):
@@ -658,9 +658,6 @@ def send_welcome(msg):
     bot.reply_to(msg, text)
 
 
-# ---------------------------------------------------------
-# COMMANDE /COPY ET SES CALLBACKS (COPY TRADING & COUPON DU JOUR)
-# ---------------------------------------------------------
 @bot.message_handler(commands=["copy"])
 def command_copy(msg):
     user_states[msg.chat.id] = None
@@ -680,36 +677,60 @@ def command_copy(msg):
     )
 
 
+# CALLBACKS MENU /COPY AVEC VÉRIFICATION DES QUOTAS FREE ET VIP
 @bot.callback_query_handler(func=lambda call: call.data in ["menu_copy_trading", "menu_coupon_jour"])
 def handle_copy_menu_callbacks(call):
-    if not check_rate_limit(call.from_user.id):
+    user_id = call.from_user.id
+    chat_id = call.message.chat.id
+
+    if not check_rate_limit(user_id):
         return bot.answer_callback_query(call.id, "⏳ Patientez 3 secondes...", show_alert=True)
+
+    allowed, status_str, count = check_user_status(user_id)
+    if not allowed:
+        bot.answer_callback_query(call.id)
+        return bot.send_message(
+            chat_id,
+            "❌ **Quota Quotidien Atteint (5/5) !**\n\nVous avez consommé vos 5 requêtes gratuites du jour.\n👉 Tapez `/vip` pour passer VIP Illimité !",
+        )
 
     bot.answer_callback_query(call.id)
 
     if call.data == "menu_copy_trading":
+        consumed, quota_info = check_and_consume_request_atomic(user_id)
+
         txt = (
             "🤖 **COPY TRADING AUTOMATIQUE**\n\n"
-            "Rejoignez nos comptes de Copy Trading et répliquez automatiquement nos positions :\n\n"
-            "• 🟡 [S'inscrire sur Exness](https://one.exnessonelink.com/a/395vyusacl)\n"
-            "   🔑 **Code Partenaire :** `395vyusacl`\n\n"
-            "• 🟢 [S'inscrire sur KuCoin](https://www.kucoin.com/ucenter/signup?&rcode=rEN8V1E&utm_medium=U17710)\n"
-            "   🔑 **Code Parrain :** `rEN8V1E`"
+            "Pour répliquer automatiquement nos positions en temps réel :\n\n"
+            "1️⃣ **Inscrivez-vous via nos liens officiels** (pour bénéficier de -10% sur les frais) :\n"
+            "   • 🟡 [S'inscrire sur Exness](https://one.exnessonelink.com/a/395vyusacl) (Code : `395vyusacl`)\n"
+            "   • 🟢 [S'inscrire sur KuCoin](https://www.kucoin.com/ucenter/signup?&rcode=rEN8V1E&utm_medium=U17710) (Code : `rEN8V1E`)\n\n"
+            "2️⃣ Téléchargez l'application **Exness Social Trading** ou allez dans la section **Copy Trading sur KuCoin**.\n"
+            "3️⃣ Recherchez notre profil : **`HILAIRE_TRADING_VIP`** et cliquez sur **« Copier »**.\n\n"
+            "⚡ *Toutes nos positions seront désormais exécutées automatiquement sur votre compte.*"
+            f"\n\n📊 *Consommation :* `{quota_info}`"
             f"{WARN}"
         )
-        bot.send_message(call.message.chat.id, txt, disable_web_page_preview=True)
+        bot.send_message(chat_id, txt, disable_web_page_preview=True)
 
     elif call.data == "menu_coupon_jour":
+        consumed, quota_info = check_and_consume_request_atomic(user_id)
+
         txt = (
-            "🎟️ **COUPON DU JOUR & BONUS DE DÉPÔT (200%)**\n\n"
-            "Utilisez nos liens et codes promos pour recevoir votre bonus et suivre nos coupons :\n\n"
-            "• 🔴 [Parier sur 1xBet](https://reffpa.com/L?tag=d_5087549m_1573c_whatsapp&site=5087549&ad=1573)\n"
-            "   🔑 **Code Promo Exclusif :** `HILAIREBET`\n\n"
-            "• 🔵 [Parier sur MelBet](https://refpa3665.com/L?tag=d_5997062m_53523c_whatsapp&site=5997062&ad=53523)\n"
-            "   🔑 **Code Promo Exclusif :** `HILAIREBET`"
+            "🎟️ **COUPON COMBINÉ DU JOUR**\n\n"
+            "📌 **Sélection du jour :**\n"
+            "• Match 1 : Real Madrid vs Barcelone ➔ *Victoire Real Madrid*\n"
+            "• Match 2 : Man City vs Chelsea ➔ *Plus de 2.5 Buts*\n"
+            "📈 **Cote Totale :** `2.45`\n\n"
+            "📲 **Code Coupon à charger sur 1xBet / MelBet :** `X98AB`\n\n"
+            "🎁 **Pas encore inscrit ? Profitez de 200% de Bonus sur dépôt :**\n"
+            "• 🔴 [Parier sur 1xBet](https://reffpa.com/L?tag=d_5087549m_1573c_whatsapp&site=5087549&ad=1573) (Code Promo : `HILAIREBET`)\n"
+            "• 🔵 [Parier sur MelBet](https://refpa3665.com/L?tag=d_5997062m_53523c_whatsapp&site=53523)\n\n"
+            "💡 *Ouvrez votre application de pari, allez dans Coupon, faites « Charger le coupon » et entrez le code `X98AB`.*"
+            f"\n\n📊 *Consommation :* `{quota_info}`"
             f"{WARN}"
         )
-        bot.send_message(call.message.chat.id, txt, disable_web_page_preview=True)
+        bot.send_message(chat_id, txt, disable_web_page_preview=True)
 
 
 @bot.message_handler(commands=["vip", "premium", "buy"])
@@ -822,7 +843,7 @@ def cmd_grant_premium(msg):
 
 
 # ---------------------------------------------------------
-# 9. COMMANDES PROTÉGÉES (PARIS SPORTIFS PAR LIGUE & CRYPTO)
+# 9. COMMANDES PROTÉGÉES (PARIS SPORTIFS & CRYPTO)
 # ---------------------------------------------------------
 @bot.message_handler(commands=["pari", "paris"])
 def handle_paris_menu(msg):
@@ -911,7 +932,7 @@ def command_backtest(msg):
 
 
 # ---------------------------------------------------------
-# 10. CALLBACKS & GESTION DES LIGUES
+# 10. CALLBACKS GENERALES & GESTION DES LIGUES
 # ---------------------------------------------------------
 @bot.callback_query_handler(func=lambda call: call.data.startswith("lg_"))
 def handle_league_callbacks(call):
