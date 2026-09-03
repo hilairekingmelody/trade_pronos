@@ -57,7 +57,9 @@ CROSS_SELL_CRYPTO = "\n\n💡 *Exécutez ce trade avec -10% de frais sur notre e
 CROSS_SELL_FOOT = "\n\n🎁 *Profitez de 200% de bonus pour parier sur ces matchs : Tapez /affiliation*"
 
 user_states = {}
+user_temp_data = {}
 user_last_request_time = {}
+last_crypto_prices = {}
 ANTI_SPAM_DELAY = 3.0
 DAILY_LIMIT_FREE = 5
 
@@ -232,6 +234,14 @@ def init_db():
                 currency TEXT,
                 product_payload TEXT,
                 status TEXT,
+                created_at TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS coupons_admin (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id TEXT,
+                caption TEXT,
                 created_at TEXT
             )
         """)
@@ -641,6 +651,28 @@ def obtenir_analyses_matchs_par_ligue(league_code):
 
 
 def obtenir_coupon_du_jour(league_code):
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    # 1. Vérifier si l'admin a publié un coupon sur-mesure aujourd'hui
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT file_id, caption, created_at FROM coupons_admin ORDER BY id DESC LIMIT 1"
+        )
+        row = cursor.fetchone()
+
+        if row:
+            file_id, caption, created_at = row["file_id"], row["caption"], row["created_at"]
+            if created_at.startswith(today_str):
+                text_out = (
+                    f"🎫 **COUPON DU JOUR VIP** 🎫\n"
+                    f"📅 **Date :** `{today_str}`\n\n"
+                    f"{caption}"
+                    f"{CROSS_SELL_FOOT}"
+                )
+                return True, {"photo": file_id, "caption": text_out}
+
+    # 2. Sinon, générer via l'API Football
     league_info = LEAGUES.get(league_code)
     if not league_info:
         return False, "❌ Compétition invalide."
@@ -648,7 +680,6 @@ def obtenir_coupon_du_jour(league_code):
     if not FOOTBALL_KEY:
         return False, "⚽ Clé API Football non configurée."
 
-    today_str = datetime.now().strftime("%Y-%m-%d")
     league_id = league_info["id"]
     url = f"https://api.football-data.org/v4/competitions/{league_id}/matches?dateFrom={today_str}&dateTo={today_str}"
     headers = {"X-Auth-Token": FOOTBALL_KEY}
@@ -660,7 +691,6 @@ def obtenir_coupon_du_jour(league_code):
             data = response.json()
             matches = data.get("matches", [])
 
-        # Fallback aux matchs scheduled généraux si pas de match strict aujourd'hui
         if not matches:
             url_fallback = f"https://api.football-data.org/v4/competitions/{league_id}/matches?status=SCHEDULED"
             res_fb = requests.get(url_fallback, headers=headers, timeout=6)
@@ -678,9 +708,8 @@ def obtenir_coupon_du_jour(league_code):
             dom = match["homeTeam"]["name"]
             ext = match["awayTeam"]["name"]
 
-            # Generer une cote réaliste pour 1xBet / Melbet basée sur un algorithme stable
             h = abs(hash(f"{dom}_{ext}_{today_str}"))
-            cote = 1.35 + (h % 55) / 100.0  # Cote entre 1.35 et 1.89
+            cote = 1.35 + (h % 55) / 100.0
             total_cote *= cote
 
             msg += f"🔥 **Match {idx} :** {dom} vs {ext}\n"
@@ -693,40 +722,67 @@ def obtenir_coupon_du_jour(league_code):
 
     except Exception as e:
         logger.error(f"Erreur Coupon du jour : {e}")
-        return False, "❌ Impossible d'extraire les coupons du jour actuellement."
+        return False, "❌ Le coupon d'aujourd'hui n'a pas encore été publié. Repassez dans quelques moments !"
 
 # ---------------------------------------------------------
-# 7. WORKER DE NOTIFICATION AUTOMATIQUE
+# 7. WORKER DE NOTIFICATION AUTOMATIQUE DYNAMIQUE ET ÉLARGIE
 # ---------------------------------------------------------
 def background_signal_notifier():
     while True:
         try:
-            time.sleep(900)
+            time.sleep(180)  # Scan toutes les 3 minutes pour une activité continue
             for pair in ["BTCUSDT", "ETHUSDT"]:
-                success, text, copy_text = analyser_crypto(pair)
-                if success and ("90%" in text or "95%" in text):
-                    with get_db_connection() as conn:
-                        cursor = conn.cursor()
-                        cursor.execute("SELECT user_id FROM users")
-                        users = cursor.fetchall()
+                url_path = f"/api/v3/klines?symbol={pair}&interval=5m&limit=20"
+                data = requete_binance_securisee(url_path)
 
-                    for user in users:
-                        try:
-                            markup = InlineKeyboardMarkup()
-                            if copy_text:
-                                markup.add(
-                                    InlineKeyboardButton(
-                                        "📋 Manuel Copy",
-                                        callback_data=f"cp_{pair}",
+                if not data:
+                    continue
+
+                closes = [float(c[4]) for c in data]
+                current_price = closes[-1]
+                prev_price = last_crypto_prices.get(pair, closes[-2])
+                last_crypto_prices[pair] = current_price
+
+                variation_pct = ((current_price - prev_price) / prev_price) * 100
+
+                # Déclencher une alerte si mouvement significatif (>0.15%)
+                if abs(variation_pct) >= 0.15:
+                    sens = "🚀 **BOOST HAUSSIER EN COURS**" if variation_pct > 0 else "📉 **CHUTE DU COURS EN COURS**"
+                    emoji = "🟢" if variation_pct > 0 else "🔴"
+                    mvt_str = f"+{variation_pct:.2f}%" if variation_pct > 0 else f"{variation_pct:.2f}%"
+
+                    success, text, copy_text = analyser_crypto(pair)
+                    if success:
+                        msg_alert = (
+                            f"⚡ **ALERTE {pair} — ACTIVITÉ MARCHÉ** ⚡\n\n"
+                            f"{sens}\n"
+                            f"🪙 **Prix Actuel :** `{current_price:,.2f} $` ({emoji} `{mvt_str}`)\n\n"
+                            f"{text}"
+                        )
+
+                        with get_db_connection() as conn:
+                            cursor = conn.cursor()
+                            cursor.execute("SELECT user_id FROM users")
+                            users = cursor.fetchall()
+
+                        for user in users:
+                            try:
+                                markup = InlineKeyboardMarkup()
+                                if copy_text:
+                                    markup.add(
+                                        InlineKeyboardButton(
+                                            "📋 Manuel Copy",
+                                            callback_data=f"cp_{pair}",
+                                        )
                                     )
+                                bot.send_message(
+                                    user["user_id"],
+                                    msg_alert,
+                                    reply_markup=markup,
                                 )
-                            bot.send_message(
-                                user["user_id"],
-                                f"🚨 **ALERTE SIGNAL FORT EN TEMPS RÉEL**\n\n{text}",
-                                reply_markup=markup,
-                            )
-                        except Exception:
-                            continue
+                            except Exception:
+                                continue
+
         except Exception as e:
             logger.error(f"Erreur Worker Notification : {e}")
 
@@ -824,10 +880,25 @@ def cmd_admin(msg):
         f"🆔 **ID Admin :** `{ADMIN_ID}`\n"
         f"👥 **Utilisateurs Totaux :** `{total_users}`\n"
         f"⭐ **Membres VIP Actifs :** `{premium_users}`\n\n"
-        "💡 *Accorder 30 jours VIP manuellement :*\n"
-        "`/grant_premium <user_id>`"
+        "💡 *Commandes Admin disponibles :*\n"
+        "• `/add` : Publier le coupon du jour (Photo + Codes)\n"
+        "• `/grant_premium <user_id>` : Accorder 30 jours VIP"
     )
     bot.reply_to(msg, txt)
+
+
+@bot.message_handler(commands=["add"])
+def cmd_add_coupon(msg):
+    if not is_admin(msg.from_user.id):
+        bot.reply_to(msg, "⛔ **Accès refusé.** Réservé à l'administrateur.")
+        return
+
+    user_states[msg.chat.id] = "WAITING_COUPON_PHOTO"
+    bot.reply_to(
+        msg,
+        "📸 **AJOUT DU COUPON DU JOUR**\n\n"
+        "Veuillez m'envoyer la **capture d'écran (photo)** de votre coupon du jour.",
+    )
 
 
 @bot.message_handler(commands=["grant_premium"])
@@ -1014,8 +1085,16 @@ def handle_coupon_day(call):
     league_code = call.data.replace("coupon_", "")
     bot.answer_callback_query(call.id, "Génération du coupon du jour...")
 
-    success, res_text = obtenir_coupon_du_jour(league_code)
-    bot.send_message(chat_id, res_text)
+    success, res_data = obtenir_coupon_du_jour(league_code)
+    if success:
+        if isinstance(res_data, dict):
+            bot.send_photo(
+                chat_id, res_data["photo"], caption=res_data["caption"]
+            )
+        else:
+            bot.send_message(chat_id, res_data)
+    else:
+        bot.send_message(chat_id, res_data)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("c_"))
@@ -1329,8 +1408,25 @@ def process_successful_payment(msg):
 
 
 # ---------------------------------------------------------
-# 12. TRAITEMENT DE TEXTE LIBRE ET VALIDATIONS
+# 12. HANDLERS GESTION DU FLOW ADMIN (/add) ET RECH. TEXTE
 # ---------------------------------------------------------
+@bot.message_handler(content_types=["photo"])
+def handle_photo_messages(msg):
+    chat_id = msg.chat.id
+    user_id = msg.from_user.id
+    state = user_states.get(chat_id)
+
+    if state == "WAITING_COUPON_PHOTO" and is_admin(user_id):
+        photo_id = msg.photo[-1].file_id
+        user_temp_data[chat_id] = {"photo_id": photo_id}
+        user_states[chat_id] = "WAITING_COUPON_TEXT"
+        bot.reply_to(
+            msg,
+            "📸 **Photo enregistrée avec succès !**\n\n"
+            "Maintenant, entrez les **codes et détails du coupon** (ex: `Code 1xBet: X87K | Cote Totale: 2.15`).",
+        )
+
+
 @bot.message_handler(func=lambda msg: not msg.text.startswith("/"))
 def handle_text_messages(msg):
     chat_id = msg.chat.id
@@ -1343,7 +1439,35 @@ def handle_text_messages(msg):
     if not check_rate_limit(user_id):
         return bot.reply_to(msg, "⏳ *Anti-Spam :* Veuillez patienter 3 secondes.")
 
-    if state == "WAITING_CRYPTO_PAIR":
+    if state == "WAITING_COUPON_TEXT" and is_admin(user_id):
+        caption_text = msg.text.strip()
+        photo_id = user_temp_data.get(chat_id, {}).get("photo_id")
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        if photo_id:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO coupons_admin (file_id, caption, created_at) VALUES (?, ?, ?)",
+                    (photo_id, caption_text, now_str),
+                )
+                conn.commit()
+
+            user_states[chat_id] = None
+            user_temp_data[chat_id] = None
+            bot.reply_to(
+                msg,
+                "✅ **Coupon du jour publié avec succès !**\n\n"
+                "Les utilisateurs Premium y ont désormais accès lorsqu'ils consultent les coupons du jour.",
+            )
+        else:
+            bot.reply_to(
+                msg,
+                "❌ **Erreur :** Aucune photo trouvée. Veuillez relancer la commande `/add`.",
+            )
+            user_states[chat_id] = None
+
+    elif state == "WAITING_CRYPTO_PAIR":
         success, res_text, copy_text = analyser_crypto(msg.text.strip())
         if success:
             consumed, quota_info = check_and_consume_request_atomic(user_id)
@@ -1381,7 +1505,7 @@ def handle_text_messages(msg):
 # ---------------------------------------------------------
 if __name__ == "__main__":
     keep_alive()
-    logger.info("Démarrage du bot v4.0...")
+    logger.info("Démarrage du bot v4.1...")
 
     t_notify = Thread(target=background_signal_notifier)
     t_notify.daemon = True
