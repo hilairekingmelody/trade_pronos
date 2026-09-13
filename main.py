@@ -1,27 +1,23 @@
 import os
 import sys
-import re
 import time
 import logging
 import sqlite3
 from datetime import datetime, timedelta
 from threading import Thread
-from typing import Tuple
 
 from flask import Flask
-import pandas as pd
 import requests
-import ta
 import telebot
 from telebot.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     LabeledPrice,
-    PreCheckoutQuery,
 )
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # ---------------------------------------------------------
-# 1. LOGGING & SÉCURITÉ
+# 1. CONFIGURATION & SÉCURITÉ
 # ---------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -31,188 +27,70 @@ logging.basicConfig(
         logging.FileHandler("bot.log", encoding="utf-8"),
     ],
 )
-logger = logging.getLogger("TradingBot")
+logger = logging.getLogger("MegaBot")
 
-TOKEN = (
-    os.environ.get("TELEGRAM_BOT_TOKEN", "").strip().replace('"', "").replace("'", "")
-)
-FOOTBALL_KEY = (
-    os.environ.get("FOOTBALL_API_KEY", "").strip()
-    or os.environ.get("API_FOOTBALL", "").strip()
-)
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+FOOTBALL_KEY = os.environ.get("FOOTBALL_API_KEY", "").strip() or os.environ.get("API_FOOTBALL", "").strip()
+CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID", "").strip()
 
 ADMIN_ID_RAW = os.environ.get("ADMIN_ID", "0").strip()
 ADMIN_ID = int(ADMIN_ID_RAW) if ADMIN_ID_RAW.isdigit() else 0
 
+PAYMENT_PROVIDER_TOKEN = os.environ.get("PAYMENT_PROVIDER_TOKEN", "").strip()
+
 if not TOKEN:
-    raise ValueError(
-        "❌ ERREUR CRITIQUE: La variable TELEGRAM_BOT_TOKEN est introuvable !"
-    )
+    raise ValueError("❌ ERREUR CRITIQUE: La variable TELEGRAM_BOT_TOKEN est introuvable !")
 
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
-WARN = "\n\n⚠️ *Attention :* Gestion du risque obligatoire. Interdit aux -18 ans."
-
-# Textes de Cross-Selling Automatiques
-CROSS_SELL_CRYPTO = "\n\n💡 *Exécutez ce trade avec -10% de frais sur notre exchange partenaire : Tapez /affiliation*"
-CROSS_SELL_FOOT = "\n\n🎁 *Profitez de 200% de bonus pour parier sur ces matchs : Tapez /affiliation*"
 
 user_states = {}
 user_temp_data = {}
-user_last_request_time = {}
-last_crypto_prices = {}
-ANTI_SPAM_DELAY = 3.0
-DAILY_LIMIT_FREE = 5
 
-# Catalogues de données (Affiliation avec 1xBet & 8 Ebooks)
-AFFILIATES = {
-    "1xbet": {
-        "name": "1xBet — Paris Sportifs",
-        "link": "https://reffpa.com/L?tag=d_5087549m_1573c_whatsapp&site=5087549&ad=1573",
-        "promo": "HILAIREBET",
-        "desc": (
-            "🔴 **1XBET — PARIS SPORTIFS**\n\n"
-            "Profitez de jusqu'à **200% de bonus** sur votre premier dépôt !\n\n"
-            "👉 **Lien d'inscription :** [Cliquez ici pour vous inscrire](https://reffpa.com/L?tag=d_5087549m_1573c_whatsapp&site=5087549&ad=1573)\n"
-            "🔑 **Code Promo Exclusif :** `HILAIREBET`"
-        ),
-    },
-    "melbet": {
-        "name": "MelBet — Paris Sportifs",
-        "link": "https://refpa3665.com/L?tag=d_5997062m_53523c_whatsapp&site=5997062&ad=53523",
-        "promo": "HILAIREBET",
-        "desc": (
-            "🔵 **MELBET — PARIS SPORTIFS**\n\n"
-            "Profitez de jusqu'à **200% de bonus** sur votre premier dépôt !\n\n"
-            "👉 **Lien d'inscription :** [Cliquez ici pour vous inscrire](https://refpa3665.com/L?tag=d_5997062m_53523c_whatsapp&site=5997062&ad=53523)\n"
-            "🔑 **Code Promo Exclusif :** `HILAIREBET`"
-        ),
-    },
+# ---------------------------------------------------------
+# 2. CATALOGUE DES AFFILIATIONS ET MINI APPS SEPARÉES
+# ---------------------------------------------------------
+AFFILIATES_TRADING = {
     "exness": {
         "name": "Exness — Forex & Trading",
         "link": "https://one.exnessonelink.com/a/395vyusacl",
         "promo": "395vyusacl",
-        "desc": (
-            "🟡 **EXNESS — FOREX & TRADING**\n\n"
-            "Plateforme de trading ultra-rapide avec spreads réduits.\n\n"
-            "👉 **Lien d'inscription :** [Cliquez ici pour vous inscrire](https://one.exnessonelink.com/a/395vyusacl)\n"
-            "🔑 **Code Partenaire :** `395vyusacl`"
-        ),
+        "min_dep": "10 $",
     },
     "kucoin": {
         "name": "KuCoin — Crypto Exchange",
         "link": "https://www.kucoin.com/ucenter/signup?&rcode=rEN8V1E&utm_medium=U17710",
         "promo": "rEN8V1E",
-        "desc": (
-            "🟢 **KUCOIN — CRYPTO EXCHANGE**\n\n"
-            "Bénéficiez de réductions exclusives sur vos frais de trading crypto.\n\n"
-            "👉 **Lien d'inscription :** [Cliquez ici pour vous inscrire](https://www.kucoin.com/ucenter/signup?&rcode=rEN8V1E&utm_medium=U17710)\n"
-            "🔑 **Code Parrain :** `rEN8V1E`"
-        ),
+        "min_dep": "10 $",
     },
 }
 
-LEAGUES = {
-    "CL": {"id": "2001", "name": "UEFA Champions League"},
-    "PD": {"id": "2014", "name": "La Liga (Espagne)"},
-    "FL1": {"id": "2015", "name": "Ligue 1 (France)"},
-    "PL": {"id": "2021", "name": "Premier League (Angleterre)"},
-    "BL1": {"id": "2002", "name": "Bundesliga (Allemagne)"},
-    "SA": {"id": "2019", "name": "Serie A (Italie)"},
-    "WC": {"id": "2000", "name": "Coupe du Monde / CAN"},
-}
-
-EBOOKS = {
-    "mkt": {
-        "title": "Formation en Marketing Digital",
-        "file_name": "marketing1.pdf",
-        "stars": 150,
-        "price_usd": "3$",
-        "summary": "📈 **Guide Marketing Digital**\nApprenez à maîtriser la publicité en ligne et l'acquisition de clients.",
+AFFILIATES_BETTING = {
+    "1xbet": {
+        "name": "1xBet — Paris Sportifs",
+        "link": "https://reffpa.com/L?tag=d_5087549m_1573c_whatsapp&site=5087549&ad=1573",
+        "promo": "HILAIREBET",
+        "min_dep": "5 $",
     },
-    "web": {
-        "title": "Création des Sites Web",
-        "file_name": "web1.pdf",
-        "stars": 150,
-        "price_usd": "3$",
-        "summary": "💻 **Guide Création de Sites Web**\nConcevez et déployez des sites internet professionnels étape par étape.",
-    },
-    "med": {
-        "title": "Méditation Guide Complet",
-        "file_name": "meditation1.pdf",
-        "stars": 250,
-        "price_usd": "5$",
-        "summary": "🧘 **Guide de Méditation**\nUn manuel pratique pour maîtriser le stress et améliorer votre concentration.",
-    },
-    "tr1": {
-        "title": "Débuter en Trading",
-        "file_name": "trading1.pdf",
-        "stars": 200,
-        "price_usd": "4$",
-        "summary": "📊 **Débuter en Trading**\nLes fondamentaux de l'analyse technique et de la gestion du risque pour débutants.",
-    },
-    "bot1": {
-        "title": "Création des Bots Telegram",
-        "file_name": "bot1.pdf",
-        "stars": 250,
-        "price_usd": "5$",
-        "summary": "🤖 **Création de Bots Telegram**\nDéveloppez et automatisez vos propres bots Telegram de A à Z.",
-    },
-    "enl1": {
-        "title": "Gagner de l'Argent en Ligne",
-        "file_name": "enligne1.pdf",
-        "stars": 200,
-        "price_usd": "4$",
-        "summary": "💡 **Gagner de l'Argent en Ligne**\nDécouvrez les meilleures stratégies éprouvées d'opportunités digitales.",
-    },
-    "aura1": {
-        "title": "Comment Retrouver son Aura",
-        "file_name": "aura1.pdf",
-        "stars": 150,
-        "price_usd": "3$",
-        "summary": "✨ **Retrouver son Aura**\nUn guide de développement personnel pour renforcer sa présence et sa confiance.",
-    },
-    "stoi1": {
-        "title": "Devenir Stoïque",
-        "file_name": "stoique1.pdf",
-        "stars": 250,
-        "price_usd": "5$",
-        "summary": "🏛️ **Devenir Stoïque**\nApprenez à développer une résilience mentale inébranlable au quotidien.",
+    "melbet": {
+        "name": "MelBet — Paris Sportifs",
+        "link": "https://refpa3665.com/L?tag=d_5997062m_53523c_whatsapp&site=5997062&ad=53523",
+        "promo": "HILAIREBET",
+        "min_dep": "5 $",
     },
 }
 
-# ---------------------------------------------------------
-# 2. SERVEUR WEB (KEEP ALIVE RENDER)
-# ---------------------------------------------------------
-app = Flask("")
-
-
-@app.route("/")
-def home():
-    return "Bot Telegram est EN LIGNE !", 200
-
-
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
-
-
-def keep_alive():
-    t = Thread(target=run_flask)
-    t.daemon = True
-    t.start()
-
+URL_MINI_APP_TRADING = os.environ.get("URL_MINI_APP_TRADING", "https://t.me/ton_bot/trading_app")
+URL_MINI_APP_BETTING = os.environ.get("URL_MINI_APP_BETTING", "https://t.me/ton_bot/betting_app")
 
 # ---------------------------------------------------------
-# 3. BASE DE DONNÉES SQLITE & AUDIT PAIEMENTS
+# 3. BASE DE DONNÉES SQLITE
 # ---------------------------------------------------------
 DB_FILE = "bot_database.db"
 
-
 def get_db_connection():
-    conn = sqlite3.connect(DB_FILE, timeout=10.0)
+    conn = sqlite3.connect(DB_FILE, timeout=15.0)
     conn.row_factory = sqlite3.Row
     return conn
-
 
 def init_db():
     with get_db_connection() as conn:
@@ -220,1301 +98,508 @@ def init_db():
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                chosen_universe TEXT,
                 status TEXT DEFAULT 'FREE',
-                daily_requests INTEGER DEFAULT 0,
-                last_request_date TEXT,
-                vip_expiry TEXT
+                funnel_step TEXT DEFAULT 'STARTED',
+                vip_expiry TEXT,
+                referrer_id INTEGER,
+                referrals_count INTEGER DEFAULT 0,
+                last_active TEXT
             )
         """)
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS payments (
-                payment_id TEXT PRIMARY KEY,
-                user_id INTEGER,
-                amount INTEGER,
-                currency TEXT,
-                product_payload TEXT,
-                status TEXT,
-                created_at TEXT
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS coupons_admin (
+            CREATE TABLE IF NOT EXISTS pending_validations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                file_id TEXT,
-                caption TEXT,
+                user_id INTEGER,
+                universe TEXT,
+                platform TEXT,
+                account_id TEXT,
+                photo_id TEXT,
+                status TEXT DEFAULT 'PENDING',
                 created_at TEXT
             )
         """)
         conn.commit()
-    logger.info("Base de données initialisée avec succès.")
-
 
 init_db()
 
-
 # ---------------------------------------------------------
-# 4. GESTION ATOMIQUE DU COMPTEUR FREE & VERIFICATION PREMIUM
+# 4. VERIFICATION FORCE JOIN (CANAL)
 # ---------------------------------------------------------
-def is_user_premium(user_id: int) -> bool:
-    if user_id == ADMIN_ID:
+def check_channel_membership(user_id: int) -> bool:
+    if not CHANNEL_ID or user_id == ADMIN_ID:
+        return True
+    try:
+        member = bot.get_chat_member(CHANNEL_ID, user_id)
+        return member.status in ["creator", "administrator", "member"]
+    except Exception as e:
+        logger.error(f"Erreur contrôle canal : {e}")
         return True
 
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT status, vip_expiry FROM users WHERE user_id = ?",
-            (user_id,),
-        )
-        row = cursor.fetchone()
-        if not row:
-            return False
-
-        status, vip_expiry = row["status"], row["vip_expiry"]
-        if status in ["PREMIUM", "VIP"]:
-            if vip_expiry:
-                try:
-                    expiry_dt = datetime.strptime(vip_expiry, "%Y-%m-%d %H:%M:%S")
-                    if datetime.now() > expiry_dt:
-                        cursor.execute(
-                            "UPDATE users SET status = 'FREE', vip_expiry = NULL WHERE user_id = ?",
-                            (user_id,),
-                        )
-                        conn.commit()
-                        return False
-                    return True
-                except ValueError:
-                    return True
-            return True
-        return False
-
-
-def check_user_status(user_id: int) -> Tuple[bool, str, int]:
-    if user_id == ADMIN_ID:
-        return True, "ADMIN", 0
-
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT status, daily_requests, last_request_date, vip_expiry FROM users WHERE user_id = ?",
-            (user_id,),
-        )
-        row = cursor.fetchone()
-
-        if not row:
-            cursor.execute(
-                "INSERT INTO users (user_id, status, daily_requests, last_request_date) VALUES (?, 'FREE', 0, ?)",
-                (user_id, today_str),
-            )
-            conn.commit()
-            return True, "FREE", 0
-
-        status, count, last_date, vip_expiry = (
-            row["status"],
-            row["daily_requests"],
-            row["last_request_date"],
-            row["vip_expiry"],
-        )
-
-        if status in ["PREMIUM", "VIP"]:
-            if vip_expiry:
-                try:
-                    expiry_dt = datetime.strptime(vip_expiry, "%Y-%m-%d %H:%M:%S")
-                    if datetime.now() > expiry_dt:
-                        cursor.execute(
-                            "UPDATE users SET status = 'FREE', vip_expiry = NULL WHERE user_id = ?",
-                            (user_id,),
-                        )
-                        conn.commit()
-                        status = "FREE"
-                    else:
-                        return True, "VIP Illimité", 0
-                except ValueError:
-                    return True, "VIP Illimité", 0
-            else:
-                return True, "VIP Illimité", 0
-
-        if last_date != today_str:
-            cursor.execute(
-                "UPDATE users SET daily_requests = 0, last_request_date = ? WHERE user_id = ?",
-                (today_str, user_id),
-            )
-            conn.commit()
-            count = 0
-
-        if count >= DAILY_LIMIT_FREE:
-            return False, "FREE", count
-
-        return True, "FREE", count
-
-
-def check_and_consume_request_atomic(user_id: int) -> Tuple[bool, str]:
-    if user_id == ADMIN_ID:
-        return True, "ADMIN"
-
-    today_str = datetime.now().strftime("%Y-%m-%d")
-
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("BEGIN IMMEDIATE")
-
-        cursor.execute(
-            "SELECT status, daily_requests, last_request_date, vip_expiry FROM users WHERE user_id = ?",
-            (user_id,),
-        )
-        row = cursor.fetchone()
-
-        if not row:
-            cursor.execute(
-                "INSERT INTO users (user_id, status, daily_requests, last_request_date) VALUES (?, 'FREE', 1, ?)",
-                (user_id, today_str),
-            )
-            conn.commit()
-            return True, f"FREE (1/{DAILY_LIMIT_FREE})"
-
-        status, count, last_date, vip_expiry = (
-            row["status"],
-            row["daily_requests"],
-            row["last_request_date"],
-            row["vip_expiry"],
-        )
-
-        if status in ["PREMIUM", "VIP"]:
-            if vip_expiry:
-                try:
-                    expiry_dt = datetime.strptime(vip_expiry, "%Y-%m-%d %H:%M:%S")
-                    if datetime.now() > expiry_dt:
-                        status = "FREE"
-                        cursor.execute(
-                            "UPDATE users SET status = 'FREE', vip_expiry = NULL WHERE user_id = ?",
-                            (user_id,),
-                        )
-                    else:
-                        conn.commit()
-                        return True, "VIP Illimité"
-                except ValueError:
-                    conn.commit()
-                    return True, "VIP Illimité"
-            else:
-                conn.commit()
-                return True, "VIP Illimité"
-
-        if last_date != today_str:
-            cursor.execute(
-                "UPDATE users SET daily_requests = 1, last_request_date = ? WHERE user_id = ?",
-                (today_str, user_id),
-            )
-            conn.commit()
-            return True, f"FREE (1/{DAILY_LIMIT_FREE})"
-
-        if count >= DAILY_LIMIT_FREE:
-            conn.commit()
-            return False, f"FREE ({count}/{DAILY_LIMIT_FREE})"
-
-        new_count = count + 1
-        cursor.execute(
-            "UPDATE users SET daily_requests = ? WHERE user_id = ?",
-            (new_count, user_id),
-        )
-        conn.commit()
-        return True, f"FREE ({new_count}/{DAILY_LIMIT_FREE})"
-
-
 # ---------------------------------------------------------
-# 5. SÉCURITÉ ET ANTI-SPAM
+# 5. AUTOMATISATIONS DANS LE CANAL (CRYPTO & FOOT)
 # ---------------------------------------------------------
-def check_rate_limit(user_id: int) -> bool:
-    now = time.time()
-    last_time = user_last_request_time.get(user_id, 0)
-    if now - last_time < ANTI_SPAM_DELAY:
-        return False
-    user_last_request_time[user_id] = now
-    return True
-
-
-def is_admin(user_id: int) -> bool:
-    return user_id == ADMIN_ID
-
-
-def sanitize_symbol(symbol: str) -> str:
-    cleaned = re.sub(r"[^A-Z0-9]", "", symbol.upper())
-    return cleaned if 2 <= len(cleaned) <= 12 else None
-
-
-# ---------------------------------------------------------
-# 6. ENGINS DE TRAITEMENT (Crypto, Backtest, Football)
-# ---------------------------------------------------------
-def requete_binance_securisee(url_path):
-    domaines = [
-        "https://api1.binance.com",
-        "https://api2.binance.com",
-        "https://api3.binance.com",
-        "https://data-api.binance.vision",
-    ]
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-    }
-    for base_url in domaines:
-        try:
-            res = requests.get(f"{base_url}{url_path}", headers=headers, timeout=5)
-            if res.status_code == 200:
-                return res.json()
-        except Exception:
-            continue
-    return None
-
-
-def analyser_crypto(pair):
-    pair_clean = sanitize_symbol(pair)
-    if not pair_clean:
-        return False, "❌ Symbole invalide. Exemple valide : `BTCUSDT`.", None
-
-    url_path = f"/api/v3/klines?symbol={pair_clean}&interval=15m&limit=100"
-    data = requete_binance_securisee(url_path)
-
-    if not data:
-        return (
-            False,
-            f"❌ Paire `{pair_clean}` introuvable ou indisponible actuellement.",
-            None,
-        )
-
+def publish_crypto_update():
+    """Publie la variation des prix de BTC et ETH directement dans le canal."""
+    if not CHANNEL_ID:
+        return
     try:
-        closes = pd.Series([float(c[4]) for c in data])
-        price = closes.iloc[-1]
-        rsi = ta.momentum.RSIIndicator(closes, window=14).rsi().iloc[-1]
-        macd_indicator = ta.trend.MACD(closes)
-        macd_diff = macd_indicator.macd_diff().iloc[-1]
-        ema20 = ta.trend.EMAIndicator(closes, window=20).ema_indicator().iloc[-1]
-        ema50 = ta.trend.EMAIndicator(closes, window=50).ema_indicator().iloc[-1]
+        res = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd&include_24hr_change=true",
+            timeout=10
+        ).json()
+        btc_price = res["bitcoin"]["usd"]
+        btc_change = res["bitcoin"]["usd_24h_change"]
+        eth_price = res["ethereum"]["usd"]
+        eth_change = res["ethereum"]["usd_24h_change"]
 
-        score = 0
-        if rsi < 35:
-            score += 2
-        elif rsi < 45:
-            score += 1
-        elif rsi > 65:
-            score -= 2
-        elif rsi > 55:
-            score -= 1
+        btc_icon = "🟢" if btc_change >= 0 else "🔴"
+        eth_icon = "🟢" if eth_change >= 0 else "🔴"
 
-        if macd_diff > 0:
-            score += 1
-        else:
-            score -= 1
-
-        if price > ema20 > ema50:
-            score += 2
-        elif price < ema20 < ema50:
-            score -= 2
-
-        if score >= 1:
-            direction = "LONG / ACHAT"
-            entry_low = price * 0.998
-            entry_high = price * 1.001
-            tp1 = price * 1.012
-            tp2 = price * 1.025
-            sl = price * 0.988
-            confiance = min(70 + abs(score) * 6, 95)
-            risq_str = "Faible / Moyen" if score >= 3 else "Moyen"
-        elif score <= -1:
-            direction = "SHORT / VENTE"
-            entry_low = price * 0.999
-            entry_high = price * 1.002
-            tp1 = price * 0.988
-            tp2 = price * 0.975
-            sl = price * 1.012
-            confiance = min(70 + abs(score) * 6, 95)
-            risq_str = "Faible / Moyen" if score <= -3 else "Moyen"
-        else:
-            direction = "NEUTRE"
-            entry_low, entry_high, tp1, tp2, sl = price, price, price, price, price
-            confiance = 50
-            risq_str = "Élevé"
-
-        res = (
-            f"📈 **SIGNAL {pair_clean}**\n\n"
-            f"🟢 **Direction :** `{direction}`\n"
-            f"⏱️ **Timeframe :** `15 MIN`\n"
-            f"🎯 **Entrée :** `{entry_low:,.2f} $ - {entry_high:,.2f} $`\n"
-            f"🥇 **TP1 :** `{tp1:,.2f} $`\n"
-            f"🥈 **TP2 :** `{tp2:,.2f} $`\n"
-            f"🛑 **Stop Loss :** `{sl:,.2f} $`\n"
-            f"⚠️ **Risque :** `{risq_str}`\n"
-            f"📊 **Confiance du signal :** `{confiance}%`"
-            f"{CROSS_SELL_CRYPTO}"
-            f"{WARN}"
+        msg = (
+            "📊 **ALERTE MARCHÉ CRYPTO (CANAL)**\n\n"
+            f"🪙 **Bitcoin (BTC) :** `{btc_price} $` | 24h : {btc_icon} `{btc_change:.2f}%`\n"
+            f"🔷 **Ethereum (ETH) :** `{eth_price} $` | 24h : {eth_icon} `{eth_change:.2f}%`\n\n"
+            "📈 *Retrouvez les signaux complets sur la Mini App Trading !*"
         )
-
-        copy_text = f"PAIR: {pair_clean}\nDIRECTION: {direction.split()[0]}\nENTRY: {entry_low:.2f} - {entry_high:.2f}\nTP1: {tp1:.2f}\nTP2: {tp2:.2f}\nSL: {sl:.2f}"
-        return True, res, copy_text
-
+        bot.send_message(CHANNEL_ID, msg)
     except Exception as e:
-        logger.error(f"Erreur analyse crypto : {e}")
-        return False, "❌ Erreur de calcul des indicateurs.", None
+        logger.error(f"Erreur alerte crypto : {e}")
 
-
-def executer_backtest(pair):
-    pair_clean = sanitize_symbol(pair)
-    if not pair_clean:
-        return False, "❌ Symbole invalide pour le backtest."
-
-    url_path = f"/api/v3/klines?symbol={pair_clean}&interval=1h&limit=500"
-    data = requete_binance_securisee(url_path)
-
-    if not data:
-        return False, f"❌ Paire `{pair_clean}` indisponible pour le backtest."
-
+def publish_daily_matches():
+    """Publie les matchs à l'affiche du jour directement dans le canal."""
+    if not CHANNEL_ID or not FOOTBALL_KEY:
+        return
     try:
-        closes = pd.Series([float(c[4]) for c in data])
-        rsi_series = ta.momentum.RSIIndicator(closes).rsi()
-
-        wins, total = 0, 0
-        for i in range(30, len(closes) - 1):
-            r = rsi_series.iloc[i]
-            if r < 35:
-                total += 1
-                if closes.iloc[i + 1] > closes.iloc[i]:
-                    wins += 1
-            elif r > 65:
-                total += 1
-                if closes.iloc[i + 1] < closes.iloc[i]:
-                    wins += 1
-
-        winrate = (wins / total * 100) if total > 0 else 0
-        res = (
-            f"📉 **BACKTEST STRATÉGIE (500 Bougies 1H)**\n\n"
-            f"🪙 **Paire :** `{pair_clean}`\n"
-            f"🔢 **Signaux exécutés :** `{total}`\n"
-            f"✅ **Trades gagnants :** `{wins}`\n"
-            f"📊 **Taux de réussite :** `{winrate:.1f}%`"
-            f"{CROSS_SELL_CRYPTO}"
-            f"{WARN}"
-        )
-        return True, res
-    except Exception as e:
-        logger.error(f"Erreur backtest : {e}")
-        return False, "❌ Erreur de calcul lors du backtest."
-
-
-def obtenir_analyses_matchs_par_ligue(league_code):
-    league_info = LEAGUES.get(league_code)
-    if not league_info:
-        return False, "❌ Compétition invalide."
-
-    if not FOOTBALL_KEY:
-        return False, "⚽ Clé API Football non configurée."
-
-    league_id = league_info["id"]
-    url = f"https://api.football-data.org/v4/competitions/{league_id}/matches?status=SCHEDULED"
-    headers = {"X-Auth-Token": FOOTBALL_KEY}
-
-    try:
-        response = requests.get(url, headers=headers, timeout=6)
-        if response.status_code != 200:
-            return False, f"⚽ Aucun match de {league_info['name']} n'est prévu pour le moment. Revenez bientôt !"
-
-        data = response.json()
-        matches = data.get("matches", [])[:5]
+        headers = {"X-Auth-Token": FOOTBALL_KEY}
+        today = datetime.now().strftime("%Y-%m-%d")
+        url = f"https://api.football-data.org/v4/matches?dateFrom={today}&dateTo={today}"
+        res = requests.get(url, headers=headers, timeout=10).json()
+        matches = res.get("matches", [])
 
         if not matches:
-            return False, f"⚽ Aucun match de {league_info['name']} n'est disponible aujourd'hui. Revenez très bientôt !"
+            return
 
-        message = f"⚽ **PRONOSTICS — {league_info['name'].upper()}** ⚽\n\n"
+        text = "⚽ **MATCHS À L'AFFICHE DU JOUR**\n\n"
+        for match in matches[:8]:
+            home = match["homeTeam"]["name"]
+            away = match["awayTeam"]["name"]
+            league = match["competition"]["name"]
+            text += f"🏆 *{league}* : {home} vs {away}\n"
 
-        for idx, match in enumerate(matches, 1):
-            equipe_dom = match["homeTeam"]["name"]
-            equipe_ext = match["awayTeam"]["name"]
-            utc_date = match["utcDate"][:10]
-
-            match_id_hash = hash(f"{equipe_dom}_{equipe_ext}")
-            pct_dom = 40 + (match_id_hash % 21)
-            pct_nul = 15 + ((match_id_hash >> 2) % 11)
-            pct_ext = 100 - (pct_dom + pct_nul)
-
-            if pct_dom >= pct_ext:
-                prono = f"Victoire ou Nul {equipe_dom} / Plus de 1.5 buts"
-            else:
-                prono = f"Victoire ou Nul {equipe_ext} / Plus de 1.5 buts"
-
-            message += f"**{idx}. {equipe_dom} vs {equipe_ext}** ({utc_date})\n"
-            message += f"📊 *Probabilités :* {equipe_dom} ({pct_dom}%) | Nul ({pct_nul}%) | {equipe_ext} ({pct_ext}%)\n"
-            message += f"💡 *Pronostic :* {prono}\n\n"
-
-        message += f"{CROSS_SELL_FOOT}"
-        return True, message
-
+        text += "\n🔥 *Consultez nos prédictions IA sur la Mini App Pronostics !*"
+        bot.send_message(CHANNEL_ID, text)
     except Exception as e:
-        logger.error(f"Erreur Football API : {e}")
-        return False, f"⚽ Aucun match de {league_info['name']} n'est prévu aujourd'hui. Revenez très bientôt !"
+        logger.error(f"Erreur alerte football : {e}")
 
+# ---------------------------------------------------------
+# 6. PARCOURS UTILISATEUR ET SÉLECTION D'UNIVERS
+# ---------------------------------------------------------
+@bot.message_handler(commands=["start"])
+def start_cmd(msg):
+    user_id = msg.from_user.id
+    username = msg.from_user.username or "Inconnu"
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-def obtenir_coupon_du_jour(league_code):
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    args = msg.text.split()
+    referrer_id = int(args[1]) if len(args) > 1 and args[1].isdigit() and int(args[1]) != user_id else None
 
-    # 1. Vérifier si l'admin a publié un coupon sur-mesure aujourd'hui
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, chosen_universe, status FROM users WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+
+        if not row:
+            cursor.execute(
+                "INSERT INTO users (user_id, username, status, funnel_step, referrer_id, last_active) VALUES (?, ?, 'FREE', 'STARTED', ?, ?)",
+                (user_id, username, referrer_id, now_str)
+            )
+            if referrer_id:
+                cursor.execute("UPDATE users SET referrals_count = referrals_count + 1 WHERE user_id = ?", (referrer_id,))
+                # Incrémentation parrainage : 3 filleuls = 1 Mois VIP
+                cursor.execute("SELECT referrals_count FROM users WHERE user_id = ?", (referrer_id,))
+                ref_row = cursor.fetchone()
+                if ref_row and ref_row["referrals_count"] % 3 == 0:
+                    new_exp = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+                    cursor.execute("UPDATE users SET status = 'VIP', vip_expiry = ? WHERE user_id = ?", (new_exp, referrer_id))
+                    try:
+                        bot.send_message(referrer_id, "🎉 **FÉLICITATIONS !** Vous avez invité 3 amis. Vous gagnez **1 mois VIP gratuit** !")
+                    except Exception:
+                        pass
+            conn.commit()
+            chosen_universe = None
+            status = "FREE"
+        else:
+            chosen_universe = row["chosen_universe"]
+            status = row["status"]
+            cursor.execute("UPDATE users SET last_active = ? WHERE user_id = ?", (now_str, user_id))
+            conn.commit()
+
+    # ÉTAPE 1 : CANAL OBLIGATOIRE
+    if not check_channel_membership(user_id):
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("📢 Rejoindre le Canal", url=f"https://t.me/{CHANNEL_ID.replace('@', '')}"))
+        markup.add(InlineKeyboardButton("✅ J'ai rejoint le canal", callback_data="check_join"))
+        bot.reply_to(msg, "🔒 **ACCÈS RESTREINT**\n\nVous devez obligatoirement rejoindre notre canal officiel pour utiliser le bot.", reply_markup=markup)
+        return
+
+    # Si l'utilisateur est déjà VIP, ouvrir directement son univers
+    if status in ["VIP", "PREMIUM"] and chosen_universe:
+        send_app_access(msg.chat.id, chosen_universe)
+        return
+
+    # ÉTAPE 2 : DEMANDER L'INTÉRÊT (TRADING OU PARIS SPORTIFS)
+    send_universe_selection(msg.chat.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "check_join")
+def callback_check_join(call):
+    if check_channel_membership(call.from_user.id):
+        bot.answer_callback_query(call.id, "✅ Accès validé !")
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        send_universe_selection(call.message.chat.id)
+    else:
+        bot.answer_callback_query(call.id, "❌ Vous n'avez pas encore rejoint le canal !", show_alert=True)
+
+def send_universe_selection(chat_id):
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("📊 Trading (Forex & Crypto)", callback_data="select_universe_trading"))
+    markup.add(InlineKeyboardButton("⚽ Paris Sportifs (Pronostics)", callback_data="select_universe_betting"))
+
+    bot.send_message(
+        chat_id,
+        "👋 **BIENVENUE !**\n\n"
+        "Lequel de nos services vous intéresse le plus aujourd'hui ?",
+        reply_markup=markup
+    )
+
+# ---------------------------------------------------------
+# 7. BRANCHES ÉTANCHES : TRADING VS BETTING
+# ---------------------------------------------------------
+@bot.callback_query_handler(func=lambda call: call.data.startswith("select_universe_"))
+def handle_universe_choice(call):
+    universe = call.data.replace("select_universe_", "")
+    user_id = call.from_user.id
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET chosen_universe = ?, funnel_step = 'UNIVERSE_SELECTED' WHERE user_id = ?", (universe, user_id))
+        conn.commit()
+
+    bot.answer_callback_query(call.id)
+
+    if universe == "trading":
+        send_trading_funnel(call.message.chat.id)
+    else:
+        send_betting_funnel(call.message.chat.id)
+
+def send_trading_funnel(chat_id):
+    text = (
+        "📊 **ACCÈS AUX SIGNAUX DE TRADING**\n\n"
+        "Pour débloquer votre accès VIP à la Mini App Trading, inscrivez-vous chez l'un de nos partenaires et effectuez un dépôt minimum de **10 $** :\n\n"
+        "🔹 **Exness** (Forex) — Code Promo : `395vyusacl`\n"
+        "👉 [S'inscrire sur Exness](https://one.exnessonelink.com/a/395vyusacl)\n\n"
+        "🔹 **KuCoin** (Crypto) — Code Promo : `rEN8V1E`\n"
+        "👉 [S'inscrire sur KuCoin](https://www.kucoin.com/ucenter/signup?&rcode=rEN8V1E&utm_medium=U17710)\n\n"
+        "👇 *Une fois inscrit et votre dépôt de 10$ effectué, cliquez ci-dessous :*"
+    )
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("📤 Envoyer mes preuves de dépôt (Trading)", callback_data="submit_proof_trading"))
+    markup.add(InlineKeyboardButton("⭐ Payer via Telegram Stars", callback_data="pay_stars"))
+    bot.send_message(chat_id, text, reply_markup=markup, disable_web_page_preview=True)
+
+def send_betting_funnel(chat_id):
+    text = (
+        "⚽ **ACCÈS AUX PRONOSTICS SPORTIFS**\n\n"
+        "Pour débloquer votre accès VIP à la Mini App Pronostics, inscrivez-vous chez l'un de nos partenaires et effectuez un dépôt minimum de **5 $** :\n\n"
+        "🔴 **1xBet** — Code Promo : `HILAIREBET`\n"
+        "👉 [S'inscrire sur 1xBet](https://reffpa.com/L?tag=d_5087549m_1573c_whatsapp&site=5087549&ad=1573)\n\n"
+        "🔵 **MelBet** — Code Promo : `HILAIREBET`\n"
+        "👉 [S'inscrire sur MelBet](https://refpa3665.com/L?tag=d_5997062m_53523c_whatsapp&site=5997062&ad=53523)\n\n"
+        "👇 *Une fois inscrit et votre dépôt de 5$ effectué, cliquez ci-dessous :*"
+    )
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("📤 Envoyer mes preuves de dépôt (Pronos)", callback_data="submit_proof_betting"))
+    markup.add(InlineKeyboardButton("⭐ Payer via Telegram Stars", callback_data="pay_stars"))
+    bot.send_message(chat_id, text, reply_markup=markup, disable_web_page_preview=True)
+
+# ---------------------------------------------------------
+# 8. SOUMISSION & VALIDATION PAR L'ADMIN
+# ---------------------------------------------------------
+@bot.callback_query_handler(func=lambda call: call.data.startswith("submit_proof_"))
+def start_proof_submission(call):
+    universe = call.data.replace("submit_proof_", "")
+    chat_id = call.message.chat.id
+
+    user_states[chat_id] = "WAITING_ID"
+    user_temp_data[chat_id] = {"universe": universe}
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET funnel_step = 'SUBMITTING_ID' WHERE user_id = ?", (call.from_user.id,))
+        conn.commit()
+
+    bot.answer_callback_query(call.id)
+    bot.send_message(chat_id, "📝 **Étape 1/2 :** Entrez votre **ID de compte** créé chez le partenaire :")
+
+@bot.message_handler(func=lambda msg: user_states.get(msg.chat.id) == "WAITING_ID")
+def process_account_id(msg):
+    chat_id = msg.chat.id
+    user_temp_data[chat_id]["account_id"] = msg.text.strip()
+    user_states[chat_id] = "WAITING_PHOTO"
+
+    bot.reply_to(msg, "📸 **Étape 2/2 :** Envoyez maintenant la **capture d'écran** confirmant votre dépôt.")
+
+@bot.message_handler(content_types=["photo"], func=lambda msg: user_states.get(msg.chat.id) == "WAITING_PHOTO")
+def process_proof_photo(msg):
+    chat_id = msg.chat.id
+    user_id = msg.from_user.id
+    photo_id = msg.photo[-1].file_id
+
+    data = user_temp_data.get(chat_id, {})
+    universe = data.get("universe", "trading")
+    account_id = data.get("account_id", "Inconnu")
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT file_id, caption, created_at FROM coupons_admin ORDER BY id DESC LIMIT 1"
+            "INSERT INTO pending_validations (user_id, universe, account_id, photo_id, created_at) VALUES (?, ?, ?, ?, ?)",
+            (user_id, universe, account_id, photo_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         )
+        req_id = cursor.lastrowid
+        cursor.execute("UPDATE users SET funnel_step = 'PROOF_SUBMITTED' WHERE user_id = ?", (user_id,))
+        conn.commit()
+
+    user_states[chat_id] = None
+    user_temp_data[chat_id] = None
+
+    bot.reply_to(msg, "✅ **Preuves reçues !** Vos données ont été transmises à l'administrateur pour vérification.")
+
+    if ADMIN_ID != 0:
+        markup = InlineKeyboardMarkup()
+        markup.add(
+            InlineKeyboardButton("✅ Valider VIP (30J)", callback_data=f"adm_accept_{req_id}"),
+            InlineKeyboardButton("❌ Refuser", callback_data=f"adm_reject_{req_id}")
+        )
+        admin_text = (
+            f"🔔 **NOUVELLE DEMANDE VIP [{universe.upper()}]**\n\n"
+            f"👤 **Utilisateur :** `{user_id}` (@{msg.from_user.username or 'Sans pseudo'})\n"
+            f"🆔 **ID Compte :** `{account_id}`\n"
+            f"🎯 **Service :** `{universe.upper()}`"
+        )
+        bot.send_photo(ADMIN_ID, photo_id, caption=admin_text, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("adm_accept_"))
+def admin_accept(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+
+    req_id = int(call.data.replace("adm_accept_", ""))
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, universe FROM pending_validations WHERE id = ?", (req_id,))
         row = cursor.fetchone()
 
         if row:
-            file_id, caption, created_at = row["file_id"], row["caption"], row["created_at"]
-            if created_at.startswith(today_str):
-                text_out = (
-                    f"🎫 **COUPON DU JOUR VIP** 🎫\n"
-                    f"📅 **Date :** `{today_str}`\n\n"
-                    f"{caption}"
-                    f"{CROSS_SELL_FOOT}"
-                )
-                return True, {"photo": file_id, "caption": text_out}
+            target_id = row["user_id"]
+            universe = row["universe"]
+            expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
 
-    # 2. Sinon, générer via l'API Football
-    league_info = LEAGUES.get(league_code)
-    if not league_info:
-        return False, "❌ Compétition invalide."
+            cursor.execute("UPDATE users SET status = 'VIP', vip_expiry = ?, funnel_step = 'COMPLETED' WHERE user_id = ?", (expiry, target_id))
+            cursor.execute("UPDATE pending_validations SET status = 'APPROVED' WHERE id = ?", (req_id,))
+            conn.commit()
 
-    if not FOOTBALL_KEY:
-        return False, "⚽ Clé API Football non configurée."
+            bot.answer_callback_query(call.id, "Validé !")
+            bot.edit_message_caption(chat_id=call.message.chat.id, message_id=call.message.message_id, caption=f"{call.message.caption}\n\n✅ **STATUT : APPROUVÉ**")
 
-    league_id = league_info["id"]
-    url = f"https://api.football-data.org/v4/competitions/{league_id}/matches?dateFrom={today_str}&dateTo={today_str}"
-    headers = {"X-Auth-Token": FOOTBALL_KEY}
+            send_app_access(target_id, universe, congrats=True)
 
-    try:
-        response = requests.get(url, headers=headers, timeout=6)
-        matches = []
-        if response.status_code == 200:
-            data = response.json()
-            matches = data.get("matches", [])
+@bot.callback_query_handler(func=lambda call: call.data.startswith("adm_reject_"))
+def admin_reject(call):
+    if call.from_user.id != ADMIN_ID:
+        return
 
-        if not matches:
-            url_fallback = f"https://api.football-data.org/v4/competitions/{league_id}/matches?status=SCHEDULED"
-            res_fb = requests.get(url_fallback, headers=headers, timeout=6)
-            if res_fb.status_code == 200:
-                matches = res_fb.json().get("matches", [])[:3]
+    req_id = int(call.data.replace("adm_reject_", ""))
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM pending_validations WHERE id = ?", (req_id,))
+        row = cursor.fetchone()
 
-        if not matches:
-            return False, f"⚽ Aucun match prévu aujourd'hui pour {league_info['name']}."
+        if row:
+            target_id = row["user_id"]
+            cursor.execute("UPDATE pending_validations SET status = 'REJECTED' WHERE id = ?", (req_id,))
+            conn.commit()
 
-        msg = f"🎫 **COUPON DU JOUR — {league_info['name'].upper()}** 🎫\n"
-        msg += f"📅 **Date :** `{today_str}`\n\n"
+            bot.answer_callback_query(call.id, "Refusé.")
+            bot.edit_message_caption(chat_id=call.message.chat.id, message_id=call.message.message_id, caption=f"{call.message.caption}\n\n❌ **STATUT : REFUSÉ**")
 
-        total_cote = 1.0
-        for idx, match in enumerate(matches[:3], 1):
-            dom = match["homeTeam"]["name"]
-            ext = match["awayTeam"]["name"]
+            try:
+                bot.send_message(target_id, "❌ **Accès non accepté** : vos preuves de dépôt n'ont pas été validées. Veuillez vous réinscrire correctement.")
+            except Exception:
+                pass
 
-            h = abs(hash(f"{dom}_{ext}_{today_str}"))
-            cote = 1.35 + (h % 55) / 100.0
-            total_cote *= cote
+def send_app_access(chat_id, universe, congrats=False):
+    app_url = URL_MINI_APP_TRADING if universe == "trading" else URL_MINI_APP_BETTING
+    label = "📈 Ouvrir la Mini App Trading" if universe == "trading" else "⚽ Ouvrir la Mini App Pronostics"
 
-            msg += f"🔥 **Match {idx} :** {dom} vs {ext}\n"
-            msg += f"📌 **Option :** Plus de 1.5 Buts / Double Chance\n"
-            msg += f"📊 **Cote 1xBet/Melbet :** `{cote:.2f}`\n\n"
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton(label, web_app=telebot.types.WebAppInfo(url=app_url)))
 
-        msg += f"📈 **COTE TOTALE DU COMBINÉ :** `{total_cote:.2f}`\n"
-        msg += f"{CROSS_SELL_FOOT}"
-        return True, msg
-
-    except Exception as e:
-        logger.error(f"Erreur Coupon du jour : {e}")
-        return False, "❌ Le coupon d'aujourd'hui n'a pas encore été publié. Repassez dans quelques moments !"
+    prefix = "🎉 **FÉLICITATIONS ! Votre dépôt a été validé !**\n\n" if congrats else ""
+    bot.send_message(
+        chat_id,
+        f"{prefix}Cliquez sur le bouton ci-dessous pour lancer votre application :",
+        reply_markup=markup
+    )
 
 # ---------------------------------------------------------
-# 7. WORKER DE NOTIFICATION AUTOMATIQUE DYNAMIQUE ET ÉLARGIE
+# 9. PAIEMENTS TELEGRAM STARS & OUTILS ADMIN
 # ---------------------------------------------------------
-def background_signal_notifier():
-    while True:
-        try:
-            time.sleep(180)  # Scan toutes les 3 minutes pour une activité continue
-            for pair in ["BTCUSDT", "ETHUSDT"]:
-                url_path = f"/api/v3/klines?symbol={pair}&interval=5m&limit=20"
-                data = requete_binance_securisee(url_path)
+@bot.callback_query_handler(func=lambda call: call.data == "pay_stars")
+def process_stars_payment(call):
+    bot.answer_callback_query(call.id)
+    prices = [LabeledPrice(label="Abonnement VIP 30 Jours", amount=250)]
+    bot.send_invoice(
+        call.message.chat.id,
+        title="Accès VIP 30 Jours",
+        description="Accès illimité aux Mini Apps.",
+        invoice_payload="vip_access_payload",
+        provider_token=PAYMENT_PROVIDER_TOKEN,
+        currency="XTR",
+        prices=prices,
+        start_parameter="vip-pay"
+    )
 
-                if not data:
-                    continue
+@bot.pre_checkout_query_handler(func=lambda query: True)
+def checkout(pre_checkout_query):
+    bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
-                closes = [float(c[4]) for c in data]
-                current_price = closes[-1]
-                prev_price = last_crypto_prices.get(pair, closes[-2])
-                last_crypto_prices[pair] = current_price
+@bot.message_handler(content_types=['successful_payment'])
+def got_payment(msg):
+    user_id = msg.from_user.id
+    expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
 
-                variation_pct = ((current_price - prev_price) / prev_price) * 100
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT chosen_universe FROM users WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        universe = row["chosen_universe"] if row and row["chosen_universe"] else "trading"
 
-                # Déclencher une alerte si mouvement significatif (>0.15%)
-                if abs(variation_pct) >= 0.15:
-                    sens = "🚀 **BOOST HAUSSIER EN COURS**" if variation_pct > 0 else "📉 **CHUTE DU COURS EN COURS**"
-                    emoji = "🟢" if variation_pct > 0 else "🔴"
-                    mvt_str = f"+{variation_pct:.2f}%" if variation_pct > 0 else f"{variation_pct:.2f}%"
+        cursor.execute("UPDATE users SET status = 'VIP', vip_expiry = ?, funnel_step = 'COMPLETED' WHERE user_id = ?", (expiry, user_id))
+        conn.commit()
 
-                    success, text, copy_text = analyser_crypto(pair)
-                    if success:
-                        msg_alert = (
-                            f"⚡ **ALERTE {pair} — ACTIVITÉ MARCHÉ** ⚡\n\n"
-                            f"{sens}\n"
-                            f"🪙 **Prix Actuel :** `{current_price:,.2f} $` ({emoji} `{mvt_str}`)\n\n"
-                            f"{text}"
-                        )
+    send_app_access(msg.chat.id, universe, congrats=True)
 
-                        with get_db_connection() as conn:
-                            cursor = conn.cursor()
-                            cursor.execute("SELECT user_id FROM users")
-                            users = cursor.fetchall()
+@bot.message_handler(commands=["notify_update"])
+def notify_update(msg):
+    """Notification globale à tous les utilisateurs actuels du bot."""
+    if msg.from_user.id != ADMIN_ID:
+        return
 
-                        for user in users:
-                            try:
-                                markup = InlineKeyboardMarkup()
-                                if copy_text:
-                                    markup.add(
-                                        InlineKeyboardButton(
-                                            "📋 Manuel Copy",
-                                            callback_data=f"cp_{pair}",
-                                        )
-                                    )
-                                bot.send_message(
-                                    user["user_id"],
-                                    msg_alert,
-                                    reply_markup=markup,
-                                )
-                            except Exception:
-                                continue
-
-        except Exception as e:
-            logger.error(f"Erreur Worker Notification : {e}")
-
-
-# ---------------------------------------------------------
-# 8. COMMANDES LIBRES
-# ---------------------------------------------------------
-@bot.message_handler(commands=["start"])
-def send_welcome(msg):
-    user_states[msg.chat.id] = None
     text = (
-        "👋 **Bienvenue sur TRADING & PRONOSTICS BOT !**\n\n"
-        "👑 **Membre Gratuit :** 5 requêtes offertes par jour.\n"
-        "⭐ **Pass VIP (30 Jours) :** Accès illimité 24/7 ! Tapez `/vip`.\n"
-        "🤝 **Partenaires :** Offres exclusives via `/affiliation`.\n"
-        "📚 **Formations :** Découvrez nos 8 Ebooks via `/ebooks`."
+        "🚀 **MISE À JOUR DE VOTRE BOT !**\n\n"
+        "Notre bot a été entièrement repensé pour vous offrir une expérience fluide :\n"
+        "✅ Mini-Apps Trading et Pronostics séparées et optimisées\n"
+        "✅ Suivi automatique des prix crypto et des matchs du jour dans le canal\n"
+        "✅ Nouveau système de parrainage (3 amis = 1 mois VIP offert !)\n\n"
+        "👉 Tapez /start pour découvrir la nouvelle version !"
+    )
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM users")
+        users = cursor.fetchall()
+
+    success, fail = 0, 0
+    for u in users:
+        try:
+            bot.send_message(u["user_id"], text)
+            success += 1
+            time.sleep(0.04)
+        except Exception:
+            fail += 1
+
+    bot.reply_to(msg, f"📊 **Rapport de diffusion :**\n✅ Envoyés : {success}\n❌ Échecs : {fail}")
+
+@bot.message_handler(commands=["stats"])
+def show_stats(msg):
+    """Affichage des statistiques réelles et exactes."""
+    if msg.from_user.id != ADMIN_ID:
+        return
+
+    thirty_days_ago = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) as total FROM users")
+        total_users = cursor.fetchone()["total"]
+
+        cursor.execute("SELECT COUNT(*) as monthly FROM users WHERE last_active >= ?", (thirty_days_ago,))
+        monthly_users = cursor.fetchone()["monthly"]
+
+        cursor.execute("SELECT COUNT(*) as vip FROM users WHERE status = 'VIP'")
+        vip_users = cursor.fetchone()["vip"]
+
+    text = (
+        "📈 **STATISTIQUES REELLES DU BOT**\n\n"
+        f"👥 **Utilisateurs inscrits :** `{total_users}`\n"
+        f"🔥 **Actifs ce mois-ci (30j) :** `{monthly_users}`\n"
+        f"⭐ **Membres VIP actuels :** `{vip_users}`"
     )
     bot.reply_to(msg, text)
 
-
-@bot.message_handler(commands=["vip", "premium", "buy"])
-def command_vip(msg):
-    user_states[msg.chat.id] = None
-    markup = InlineKeyboardMarkup()
-    btn_stars = InlineKeyboardButton(
-        "⭐ S'abonner VIP 30 Jours (250 Stars)", callback_data="buy_vip_stars"
-    )
-    markup.add(btn_stars)
-
-    txt = (
-        "👑 **PASS VIP 30 JOURS - TELEGRAM STARS**\n\n"
-        "Débloquez l'accès total pendant **30 jours** :\n"
-        "✅ **Analyses Crypto & Signaux ILLIMITÉS**\n"
-        "✅ **Copie Manuel des Signaux Crypto**\n"
-        "✅ **Coupons du Jour (Vrais Matchs & Cotes)**\n"
-        "✅ **Backtests & Analyses ILLIMITÉS**\n\n"
-        "Prix : **250 Telegram Stars / mois**\n"
-        "Cliquez ci-dessous pour lancer le paiement sécurisé :"
-    )
-    bot.reply_to(msg, txt, reply_markup=markup)
-
-
-@bot.message_handler(commands=["affiliation", "partenaires", "partenaire"])
-def command_affiliation(msg):
-    user_states[msg.chat.id] = None
-    markup = InlineKeyboardMarkup()
-    for key, data in AFFILIATES.items():
-        markup.add(
-            InlineKeyboardButton(
-                f"🎁 {data['name']}", callback_data=f"aff_{key}"
-            )
-        )
-
-    bot.reply_to(
-        msg,
-        "🤝 **PARTENAIRES & CODES PROMO EXCLUSIFS**\n\n"
-        "Sélectionnez une plateforme partenaire ci-dessous pour obtenir votre lien et code promo :",
-        reply_markup=markup,
-    )
-
-
-@bot.message_handler(commands=["ebooks", "ebook", "formations", "formation"])
-def command_ebooks(msg):
-    user_states[msg.chat.id] = None
-    markup = InlineKeyboardMarkup(row_width=1)
-    for key, data in EBOOKS.items():
-        btn_text = f"📘 {data['title']} ({data['price_usd']})"
-        markup.add(InlineKeyboardButton(btn_text, callback_data=f"eb_view_{key}"))
-
-    bot.reply_to(
-        msg,
-        "📚 **CATALOGUE DE FORMATIONS & EBOOKS (8 PDF)**\n\n"
-        "Cliquez sur une formation ci-dessous pour lire le résumé et commander :",
-        reply_markup=markup,
-    )
-
-
-@bot.message_handler(commands=["admin"])
-def cmd_admin(msg):
-    user_states[msg.chat.id] = None
-    if not is_admin(msg.from_user.id):
-        bot.reply_to(msg, "⛔ **Accès refusé.** Réservé à l'administrateur.")
-        return
-
+# ---------------------------------------------------------
+# 10. SCHEDULER DE TÂCHES AUTOMATIQUES
+# ---------------------------------------------------------
+def send_funnel_reminders():
+    """Rappels personnalisés à 6h, 12h et 18h."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT COUNT(*), SUM(CASE WHEN status IN ('PREMIUM', 'VIP') THEN 1 ELSE 0 END) FROM users"
-        )
-        row = cursor.fetchone()
-        total_users, premium_users = row[0], row[1] or 0
+        cursor.execute("SELECT user_id, chosen_universe FROM users WHERE status = 'FREE' AND funnel_step != 'COMPLETED'")
+        rows = cursor.fetchall()
 
-    txt = (
-        "⚙️ **PANNEAU D'ADMINISTRATION**\n\n"
-        f"🆔 **ID Admin :** `{ADMIN_ID}`\n"
-        f"👥 **Utilisateurs Totaux :** `{total_users}`\n"
-        f"⭐ **Membres VIP Actifs :** `{premium_users}`\n\n"
-        "💡 *Commandes Admin disponibles :*\n"
-        "• `/add` : Publier le coupon du jour (Photo + Codes)\n"
-        "• `/grant_premium <user_id>` : Accorder 30 jours VIP"
-    )
-    bot.reply_to(msg, txt)
+        for row in rows:
+            user_id = row["user_id"]
+            universe = row["chosen_universe"]
 
+            if universe == "trading":
+                msg = "⏳ **Rappel Trading :** N'oubliez pas d'effectuer votre dépôt de 10$ sur Exness/KuCoin pour débloquer votre accès VIP !"
+            elif universe == "betting":
+                msg = "⏳ **Rappel Pronostics :** N'oubliez pas d'effectuer votre dépôt de 5$ sur 1xBet/MelBet pour débloquer vos prédictions !"
+            else:
+                msg = "⏳ **N'attendez plus !** Rejoignez-nous et choisissez votre domaine (Trading ou Pronostics) dès maintenant."
 
-@bot.message_handler(commands=["add"])
-def cmd_add_coupon(msg):
-    if not is_admin(msg.from_user.id):
-        bot.reply_to(msg, "⛔ **Accès refusé.** Réservé à l'administrateur.")
-        return
+            try:
+                bot.send_message(user_id, msg)
+                time.sleep(0.05)
+            except Exception:
+                pass
 
-    user_states[msg.chat.id] = "WAITING_COUPON_PHOTO"
-    bot.reply_to(
-        msg,
-        "📸 **AJOUT DU COUPON DU JOUR**\n\n"
-        "Veuillez m'envoyer la **capture d'écran (photo)** de votre coupon du jour.",
-    )
-
-
-@bot.message_handler(commands=["grant_premium"])
-def cmd_grant_premium(msg):
-    if not is_admin(msg.from_user.id):
-        return
-
-    parts = msg.text.split()
-    if len(parts) < 2 or not parts[1].isdigit():
-        bot.reply_to(msg, "❌ Format correct : `/grant_premium <user_id>`")
-        return
-
-    target_id = int(parts[1])
-    expiry_date = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
-
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE users SET status = 'PREMIUM', vip_expiry = ? WHERE user_id = ?",
-            (expiry_date, target_id),
-        )
-        conn.commit()
-
-    bot.reply_to(
-        msg,
-        f"✅ L'utilisateur `{target_id}` est **PREMIUM pour 30 jours** (Jusqu'au {expiry_date}) !",
-    )
-
+scheduler = BackgroundScheduler(daemon=True)
+scheduler.add_job(send_funnel_reminders, 'cron', hour='6,12,18')
+scheduler.add_job(publish_crypto_update, 'interval', hours=4)
+scheduler.add_job(publish_daily_matches, 'cron', hour=8)
+scheduler.start()
 
 # ---------------------------------------------------------
-# 9. COMMANDES PROTÉGÉES (PARIS SPORTIFS & CRYPTO)
+# 11. DÉMARRAGE DU BOT & SERVEUR FLASK
 # ---------------------------------------------------------
-@bot.message_handler(commands=["pari", "paris"])
-def handle_paris_menu(msg):
-    user_states[msg.chat.id] = None
-    if not check_rate_limit(msg.from_user.id):
-        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
+app = Flask("")
 
-    allowed, status_str, count = check_user_status(msg.from_user.id)
-    if not allowed:
-        return bot.reply_to(
-            msg,
-            "❌ **Quota Quotidien Atteint (5/5) !**\n\nVous avez consommé vos 5 requêtes gratuites du jour.\n👉 Tapez `/vip` pour vous abonner et débloquer l'accès **ILLIMITÉ** !",
-        )
+@app.route("/")
+def home():
+    return "Bot en ligne", 200
 
-    markup = InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        InlineKeyboardButton("🏆 UEFA Champions League", callback_data="lg_CL"),
-        InlineKeyboardButton("🇪🇸 La Liga (Espagne)", callback_data="lg_PD"),
-        InlineKeyboardButton("🇫🇷 Ligue 1 (France)", callback_data="lg_FL1"),
-        InlineKeyboardButton("🇬🇧 Premier League (Angleterre)", callback_data="lg_PL"),
-        InlineKeyboardButton("🇩🇪 Bundesliga (Allemagne)", callback_data="lg_BL1"),
-        InlineKeyboardButton("🇮🇹 Serie A (Italie)", callback_data="lg_SA"),
-        InlineKeyboardButton("🌍 CAN / Coupe du Monde", callback_data="lg_WC"),
-    )
-    bot.reply_to(
-        msg,
-        "⚽ **PRONOSTICS SPORTIFS — CHOISISSEZ UNE COMPÉTITION**\n\nSélectionnez une ligue pour consulter tous les matchs prévus :",
-        reply_markup=markup,
-    )
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
 
+def keep_alive():
+    t = Thread(target=run_flask)
+    t.daemon = True
+    t.start()
 
-@bot.message_handler(commands=["crypto"])
-def command_crypto(msg):
-    user_states[msg.chat.id] = None
-    if not check_rate_limit(msg.from_user.id):
-        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
-
-    allowed, status_str, count = check_user_status(msg.from_user.id)
-    if not allowed:
-        return bot.reply_to(
-            msg,
-            "❌ **Quota Quotidien Atteint (5/5) !**\n\nVous avez consommé vos 5 requêtes gratuites du jour.\n👉 Tapez `/vip` pour vous abonner et débloquer l'accès **ILLIMITÉ** !",
-        )
-
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton("🟡 BTC/USDT", callback_data="c_BTCUSDT"),
-        InlineKeyboardButton("🔹 ETH/USDT", callback_data="c_ETHUSDT"),
-        InlineKeyboardButton("☀️ SOL/USDT", callback_data="c_SOLUSDT"),
-        InlineKeyboardButton("🔶 BNB/USDT", callback_data="c_BNBUSDT"),
-        InlineKeyboardButton("🌐 XRP/USDT", callback_data="c_XRPUSDT"),
-        InlineKeyboardButton("✍️ Autre symbole...", callback_data="c_custom"),
-    )
-    bot.reply_to(
-        msg,
-        "📈 **ANALYSE & SIGNAUX TRADING CRYPTO**\n\nSélectionnez une paire :",
-        reply_markup=markup,
-    )
-
-
-@bot.message_handler(commands=["backtest"])
-def command_backtest(msg):
-    user_states[msg.chat.id] = None
-    if not check_rate_limit(msg.from_user.id):
-        return bot.reply_to(msg, "⏳ *Anti-Spam :* Patientez 3 secondes.")
-
-    allowed, status_str, count = check_user_status(msg.from_user.id)
-    if not allowed:
-        return bot.reply_to(
-            msg,
-            "❌ **Quota Quotidien Atteint (5/5) !**\n\nVous avez consommé vos 5 requêtes gratuites du jour.\n👉 Tapez `/vip` pour vous abonner et débloquer l'accès **ILLIMITÉ** !",
-        )
-
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton("🟡 BTC/USDT", callback_data="bt_BTCUSDT"),
-        InlineKeyboardButton("🔹 ETH/USDT", callback_data="bt_ETHUSDT"),
-        InlineKeyboardButton("☀️ SOL/USDT", callback_data="bt_SOLUSDT"),
-        InlineKeyboardButton("✍️ Autre symbole...", callback_data="bt_custom"),
-    )
-    bot.reply_to(
-        msg,
-        "📉 **BACKTEST STRATÉGIE**\n\nSélectionnez une paire :",
-        reply_markup=markup,
-    )
-
-
-# ---------------------------------------------------------
-# 10. CALLBACKS & GESTION DES LIGUES, COUPONS ET MANUEL COPY
-# ---------------------------------------------------------
-@bot.callback_query_handler(func=lambda call: call.data.startswith("lg_"))
-def handle_league_callbacks(call):
-    chat_id = call.message.chat.id
-    user_id = call.from_user.id
-
-    if not check_rate_limit(user_id):
-        return bot.answer_callback_query(
-            call.id, "⏳ Patientez 3 secondes...", show_alert=True
-        )
-
-    allowed, status_str, count = check_user_status(user_id)
-    if not allowed:
-        bot.send_message(
-            chat_id,
-            "❌ **Quota Quotidien Atteint (5/5) !**\n\nVous avez consommé vos 5 requêtes gratuites du jour.\n👉 Tapez `/vip` pour vous abonner et débloquer l'accès **ILLIMITÉ** !",
-        )
-        bot.answer_callback_query(call.id)
-        return
-
-    league_code = call.data.replace("lg_", "")
-    bot.answer_callback_query(call.id, "Recherche des matchs...")
-
-    success, res_text = obtenir_analyses_matchs_par_ligue(league_code)
-
-    if success:
-        consumed, quota_info = check_and_consume_request_atomic(user_id)
-        markup = InlineKeyboardMarkup()
-        markup.add(
-            InlineKeyboardButton(
-                "🎫 Coupon du jour", callback_data=f"coupon_{league_code}"
-            )
-        )
-        bot.send_message(
-            chat_id,
-            f"{res_text}\n\n📊 *Consommation :* `{quota_info}`",
-            reply_markup=markup,
-        )
-    else:
-        bot.send_message(chat_id, res_text)
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("coupon_"))
-def handle_coupon_day(call):
-    chat_id = call.message.chat.id
-    user_id = call.from_user.id
-
-    if not check_rate_limit(user_id):
-        return bot.answer_callback_query(
-            call.id, "⏳ Patientez 3 secondes...", show_alert=True
-        )
-
-    # Vérification VIP / PREMIUM
-    if not is_user_premium(user_id):
-        bot.answer_callback_query(call.id)
-        bot.send_message(
-            chat_id,
-            "🔒 **ACCÈS PREMIUM REQUIS !**\n\n"
-            "Les Coupons du Jour avec vrais matchs et cotes 1xBet / MelBet sont réservés aux **membres Premium**.\n\n"
-            "👉 Tapez `/vip` pour prendre votre abonnement et débloquer cette fonctionnalité !",
-        )
-        return
-
-    league_code = call.data.replace("coupon_", "")
-    bot.answer_callback_query(call.id, "Génération du coupon du jour...")
-
-    success, res_data = obtenir_coupon_du_jour(league_code)
-    if success:
-        if isinstance(res_data, dict):
-            bot.send_photo(
-                chat_id, res_data["photo"], caption=res_data["caption"]
-            )
-        else:
-            bot.send_message(chat_id, res_data)
-    else:
-        bot.send_message(chat_id, res_data)
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("c_"))
-def handle_crypto_callbacks(call):
-    chat_id = call.message.chat.id
-    user_id = call.from_user.id
-
-    if not check_rate_limit(user_id):
-        return bot.answer_callback_query(
-            call.id, "⏳ Patientez 3 secondes...", show_alert=True
-        )
-
-    pair = call.data.replace("c_", "")
-    if pair == "custom":
-        user_states[chat_id] = "WAITING_CRYPTO_PAIR"
-        bot.send_message(
-            chat_id, "🔍 Tapez le nom de la paire à analyser (ex: `ADAUSDT`) :"
-        )
-        bot.answer_callback_query(call.id)
-        return
-
-    allowed, status_str, count = check_user_status(user_id)
-    if not allowed:
-        bot.send_message(
-            chat_id,
-            "❌ **Quota Quotidien Atteint (5/5) !**\n\nVous avez consommé vos 5 requêtes gratuites du jour.\n👉 Tapez `/vip` pour vous abonner et débloquer l'accès **ILLIMITÉ** !",
-        )
-        bot.answer_callback_query(call.id)
-        return
-
-    bot.answer_callback_query(call.id, "Analyse en cours...")
-    success, res_text, copy_text = analyser_crypto(pair)
-
-    if success:
-        consumed, quota_info = check_and_consume_request_atomic(user_id)
-        markup = InlineKeyboardMarkup()
-        if copy_text:
-            markup.add(
-                InlineKeyboardButton(
-                    "📋 Manuel Copy", callback_data=f"cp_{pair}"
-                )
-            )
-
-        bot.send_message(
-            chat_id,
-            f"{res_text}\n\n📊 *Consommation :* `{quota_info}`",
-            reply_markup=markup,
-        )
-    else:
-        bot.send_message(chat_id, res_text)
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("cp_"))
-def handle_copy_signal(call):
-    user_id = call.from_user.id
-    chat_id = call.message.chat.id
-
-    if not is_user_premium(user_id):
-        bot.answer_callback_query(call.id)
-        bot.send_message(
-            chat_id,
-            "🔒 **ACCÈS PREMIUM REQUIS !**\n\n"
-            "La fonction **Manuel Copy** pour copier directement les ordres vers KuCoin ou Exness est réservée aux **membres Premium**.\n\n"
-            "👉 Tapez `/vip` pour vous abonner !",
-        )
-        return
-
-    pair = call.data.replace("cp_", "")
-    success, res_text, copy_text = analyser_crypto(pair)
-    if success and copy_text:
-        bot.answer_callback_query(call.id, "Signal copié !", show_alert=False)
-        bot.send_message(
-            chat_id,
-            f"📋 **TEXTE PRÊT À COPIER / COLLER :**\n\n`{copy_text}`\n\nCopiez et collez ce texte sur KuCoin ou Exness.",
-        )
-    else:
-        bot.answer_callback_query(
-            call.id, "Impossible de générer le texte à copier.", show_alert=True
-        )
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("bt_"))
-def handle_backtest_callbacks(call):
-    chat_id = call.message.chat.id
-    user_id = call.from_user.id
-
-    if not check_rate_limit(user_id):
-        return bot.answer_callback_query(
-            call.id, "⏳ Patientez 3 secondes...", show_alert=True
-        )
-
-    pair = call.data.replace("bt_", "")
-    if pair == "custom":
-        user_states[chat_id] = "WAITING_BACKTEST_PAIR"
-        bot.send_message(
-            chat_id, "🔍 Tapez le nom de la paire pour le backtest (ex: `DOGEUSDT`) :"
-        )
-        bot.answer_callback_query(call.id)
-        return
-
-    allowed, status_str, count = check_user_status(user_id)
-    if not allowed:
-        bot.send_message(
-            chat_id,
-            "❌ **Quota Quotidien Atteint (5/5) !**\n\nVous avez consommé vos 5 requêtes gratuites du jour.\n👉 Tapez `/vip` pour vous abonner et débloquer l'accès **ILLIMITÉ** !",
-        )
-        bot.answer_callback_query(call.id)
-        return
-
-    bot.answer_callback_query(call.id, "Backtest en cours...")
-    success, res_text = executer_backtest(pair)
-
-    if success:
-        consumed, quota_info = check_and_consume_request_atomic(user_id)
-        bot.send_message(chat_id, f"{res_text}\n\n📊 *Consommation :* `{quota_info}`")
-    else:
-        bot.send_message(chat_id, res_text)
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("aff_"))
-def handle_aff_callbacks(call):
-    if not check_rate_limit(call.from_user.id):
-        return bot.answer_callback_query(
-            call.id, "⏳ Patientez 3 secondes...", show_alert=True
-        )
-
-    aff_key = call.data.replace("aff_", "")
-    partner = AFFILIATES.get(aff_key)
-    if partner:
-        bot.answer_callback_query(call.id)
-        bot.send_message(
-            call.message.chat.id, partner["desc"], disable_web_page_preview=False
-        )
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("eb_view_"))
-def handle_ebook_view_callbacks(call):
-    if not check_rate_limit(call.from_user.id):
-        return bot.answer_callback_query(
-            call.id, "⏳ Patientez 3 secondes...", show_alert=True
-        )
-
-    ebook_key = call.data.replace("eb_view_", "")
-    ebook = EBOOKS.get(ebook_key)
-    if ebook:
-        bot.answer_callback_query(call.id)
-        markup = InlineKeyboardMarkup()
-        markup.add(
-            InlineKeyboardButton(
-                f"⭐ Acheter ({ebook['stars']} Stars)",
-                callback_data=f"buy_eb_{ebook_key}",
-            )
-        )
-
-        txt = (
-            f"{ebook['summary']}\n\n"
-            f"🏷️ **Prix :** `{ebook['price_usd']}` ({ebook['stars']} Stars Telegram)\n"
-            f"📥 **Format :** Fichier PDF téléchargeable instantanément."
-        )
-        bot.send_message(call.message.chat.id, txt, reply_markup=markup)
-
-
-# ---------------------------------------------------------
-# 11. DÉLIVRANCE & SÉCURISATION PAIEMENTS TELEGRAM STARS
-# ---------------------------------------------------------
-@bot.callback_query_handler(func=lambda call: call.data == "buy_vip_stars")
-def process_buy_vip_stars(call):
-    payload_unique = f"vip_sub_{call.from_user.id}_{int(time.time())}"
-    bot.send_invoice(
-        call.message.chat.id,
-        title="Pass VIP 30 Jours",
-        description="Accès illimité aux signaux Trading Crypto, Backtests et Pronostics Sportifs pendant 30 jours.",
-        invoice_payload=payload_unique,
-        provider_token="",
-        currency="XTR",
-        prices=[LabeledPrice("Abonnement 1 Mois", 250)],
-    )
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("buy_eb_"))
-def process_buy_ebook_stars(call):
-    ebook_key = call.data.replace("buy_eb_", "")
-    ebook = EBOOKS.get(ebook_key)
-    if not ebook:
-        return
-
-    payload_unique = f"eb_pay_{ebook_key}_{call.from_user.id}_{int(time.time())}"
-    bot.send_invoice(
-        call.message.chat.id,
-        title=ebook["title"],
-        description=f"Téléchargement immédiat du PDF : {ebook['title']}",
-        invoice_payload=payload_unique,
-        provider_token="",
-        currency="XTR",
-        prices=[LabeledPrice(f"Ebook {ebook['title']}", ebook["stars"])],
-    )
-
-
-@bot.pre_checkout_query_handler(func=lambda query: True)
-def process_pre_checkout(query: PreCheckoutQuery):
-    payload = query.invoice_payload
-    currency = query.currency
-    total_amount = query.total_amount
-
-    if currency != "XTR":
-        bot.answer_pre_checkout_query(
-            query.id, ok=False, error_message="Devise de paiement non supportée."
-        )
-        return
-
-    if payload.startswith("vip_sub_"):
-        if total_amount != 250:
-            bot.answer_pre_checkout_query(
-                query.id,
-                ok=False,
-                error_message="Montant du paiement incorrect pour l'offre VIP.",
-            )
-            return
-        bot.answer_pre_checkout_query(query.id, ok=True)
-        return
-
-    elif payload.startswith("eb_pay_"):
-        parts = payload.split("_")
-        if len(parts) >= 3:
-            ebook_key = parts[2]
-            ebook = EBOOKS.get(ebook_key)
-            if ebook and total_amount == ebook["stars"]:
-                bot.answer_pre_checkout_query(query.id, ok=True)
-                return
-
-    bot.answer_pre_checkout_query(
-        query.id, ok=False, error_message="La commande n'est plus valide ou a expiré."
-    )
-
-
-@bot.message_handler(content_types=["successful_payment"])
-def process_successful_payment(msg):
-    payment_info = msg.successful_payment
-    payload = payment_info.invoice_payload
-    user_id = msg.from_user.id
-    payment_id = (
-        payment_info.telegram_payment_charge_id
-        or payment_info.provider_payment_charge_id
-    )
-    amount = payment_info.total_amount
-    currency = payment_info.currency
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-
-        cursor.execute(
-            "SELECT payment_id FROM payments WHERE payment_id = ?", (payment_id,)
-        )
-        if cursor.fetchone():
-            bot.reply_to(msg, "⚠️ Ce paiement a déjà été validé et traité.")
-            return
-
-        if payload.startswith("vip_sub_"):
-            if currency == "XTR" and amount == 250:
-                expiry_date = (datetime.now() + timedelta(days=30)).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
-
-                cursor.execute(
-                    "INSERT INTO payments (payment_id, user_id, amount, currency, product_payload, status, created_at) VALUES (?, ?, ?, ?, ?, 'COMPLETED', ?)",
-                    (payment_id, user_id, amount, currency, payload, now_str),
-                )
-                cursor.execute(
-                    "UPDATE users SET status = 'PREMIUM', vip_expiry = ? WHERE user_id = ?",
-                    (expiry_date, user_id),
-                )
-                conn.commit()
-
-                bot.reply_to(
-                    msg,
-                    f"🎉 **FÉLICITATIONS ET BIENVENUE VIP !** 🎉\n\n"
-                    f"Votre abonnement de **30 Jours** a été activé avec succès !\n"
-                    f"📅 Valable jusqu'au : `{expiry_date}`",
-                )
-
-        elif payload.startswith("eb_pay_"):
-            parts = payload.split("_")
-            if len(parts) >= 3:
-                ebook_key = parts[2]
-                ebook = EBOOKS.get(ebook_key)
-                if ebook and currency == "XTR" and amount == ebook["stars"]:
-                    cursor.execute(
-                        "INSERT INTO payments (payment_id, user_id, amount, currency, product_payload, status, created_at) VALUES (?, ?, ?, ?, ?, 'COMPLETED', ?)",
-                        (payment_id, user_id, amount, currency, payload, now_str),
-                    )
-                    conn.commit()
-
-                    file_path = os.path.join("ebooks", ebook["file_name"])
-                    if os.path.exists(file_path):
-                        bot.reply_to(
-                            msg,
-                            f"✅ **Paiement confirmé pour :** *{ebook['title']}* !\nVoici votre fichier PDF :",
-                        )
-                        with open(file_path, "rb") as pdf_file:
-                            bot.send_document(
-                                msg.chat.id,
-                                pdf_file,
-                                caption=f"📘 **{ebook['title']}**",
-                            )
-                    else:
-                        bot.reply_to(
-                            msg,
-                            f"✅ **Paiement confirmé !**\n⚠️ Le fichier `{ebook['file_name']}` n'est pas encore présent sur le serveur. Contactez l'administrateur avec votre ID : `{payment_id}`.",
-                        )
-
-
-# ---------------------------------------------------------
-# 12. HANDLERS GESTION DU FLOW ADMIN (/add) ET RECH. TEXTE
-# ---------------------------------------------------------
-@bot.message_handler(content_types=["photo"])
-def handle_photo_messages(msg):
-    chat_id = msg.chat.id
-    user_id = msg.from_user.id
-    state = user_states.get(chat_id)
-
-    if state == "WAITING_COUPON_PHOTO" and is_admin(user_id):
-        photo_id = msg.photo[-1].file_id
-        user_temp_data[chat_id] = {"photo_id": photo_id}
-        user_states[chat_id] = "WAITING_COUPON_TEXT"
-        bot.reply_to(
-            msg,
-            "📸 **Photo enregistrée avec succès !**\n\n"
-            "Maintenant, entrez les **codes et détails du coupon** (ex: `Code 1xBet: X87K | Cote Totale: 2.15`).",
-        )
-
-
-@bot.message_handler(func=lambda msg: not msg.text.startswith("/"))
-def handle_text_messages(msg):
-    chat_id = msg.chat.id
-    user_id = msg.from_user.id
-    state = user_states.get(chat_id)
-
-    if not state:
-        return
-
-    if not check_rate_limit(user_id):
-        return bot.reply_to(msg, "⏳ *Anti-Spam :* Veuillez patienter 3 secondes.")
-
-    if state == "WAITING_COUPON_TEXT" and is_admin(user_id):
-        caption_text = msg.text.strip()
-        photo_id = user_temp_data.get(chat_id, {}).get("photo_id")
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        if photo_id:
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "INSERT INTO coupons_admin (file_id, caption, created_at) VALUES (?, ?, ?)",
-                    (photo_id, caption_text, now_str),
-                )
-                conn.commit()
-
-            user_states[chat_id] = None
-            user_temp_data[chat_id] = None
-            bot.reply_to(
-                msg,
-                "✅ **Coupon du jour publié avec succès !**\n\n"
-                "Les utilisateurs Premium y ont désormais accès lorsqu'ils consultent les coupons du jour.",
-            )
-        else:
-            bot.reply_to(
-                msg,
-                "❌ **Erreur :** Aucune photo trouvée. Veuillez relancer la commande `/add`.",
-            )
-            user_states[chat_id] = None
-
-    elif state == "WAITING_CRYPTO_PAIR":
-        success, res_text, copy_text = analyser_crypto(msg.text.strip())
-        if success:
-            consumed, quota_info = check_and_consume_request_atomic(user_id)
-            user_states[chat_id] = None
-            markup = InlineKeyboardMarkup()
-            if copy_text:
-                markup.add(
-                    InlineKeyboardButton(
-                        "📋 Manuel Copy",
-                        callback_data=f"cp_{msg.text.strip().upper()}",
-                    )
-                )
-            bot.send_message(
-                chat_id,
-                f"{res_text}\n\n📊 *Consommation :* `{quota_info}`",
-                reply_markup=markup,
-            )
-        else:
-            bot.send_message(chat_id, res_text)
-
-    elif state == "WAITING_BACKTEST_PAIR":
-        success, res_text = executer_backtest(msg.text.strip())
-        if success:
-            consumed, quota_info = check_and_consume_request_atomic(user_id)
-            user_states[chat_id] = None
-            bot.send_message(
-                chat_id, f"{res_text}\n\n📊 *Consommation :* `{quota_info}`"
-            )
-        else:
-            bot.send_message(chat_id, res_text)
-
-
-# ---------------------------------------------------------
-# 13. DÉMARRAGE DU BOT
-# ---------------------------------------------------------
 if __name__ == "__main__":
     keep_alive()
-    logger.info("Démarrage du bot v4.1...")
-
-    t_notify = Thread(target=background_signal_notifier)
-    t_notify.daemon = True
-    t_notify.start()
-
-    try:
-        bot.remove_webhook()
-        time.sleep(1)
-    except Exception as e:
-        logger.warning(f"Suppression du webhook ignorée : {e}")
-
+    logger.info("MegaBot V2 100% Intégré Démarré avec succès !")
     bot.infinity_polling(none_stop=True, skip_pending=True)
