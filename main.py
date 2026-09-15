@@ -96,7 +96,7 @@ if bot:
 
     @bot.message_handler(commands=["start"])
     def start_cmd(msg):
-        u_id = msg.from_user.id
+        u_id = int(msg.from_user.id)
         u_name = msg.from_user.username or "Utilisateur"
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -130,13 +130,14 @@ if bot:
 
     @bot.callback_query_handler(func=lambda call: call.data == "check_join")
     def callback_check_join(call):
-        if check_channel_membership(call.from_user.id):
+        u_id = int(call.from_user.id)
+        if check_channel_membership(u_id):
             bot.answer_callback_query(call.id, "✅ Accès validé !")
             try:
                 bot.delete_message(call.message.chat.id, call.message.message_id)
             except Exception:
                 pass
-            send_main_menu(call.message.chat.id, call.from_user.username or "Utilisateur", call.from_user.id)
+            send_main_menu(call.message.chat.id, call.from_user.username or "Utilisateur", u_id)
         else:
             bot.answer_callback_query(call.id, "❌ Vous n'avez pas encore rejoint le canal !", show_alert=True)
 
@@ -144,9 +145,9 @@ if bot:
         is_verified = False
         with get_db() as conn:
             c = conn.cursor()
-            c.execute("SELECT status FROM users WHERE user_id = ?", (u_id,))
+            c.execute("SELECT status FROM users WHERE user_id = ?", (int(u_id),))
             row = c.fetchone()
-            if row and (row["status"] == "VERIFIED" or u_id == ADMIN_ID):
+            if row and (row["status"] == "VERIFIED" or int(u_id) == ADMIN_ID):
                 is_verified = True
 
         markup = InlineKeyboardMarkup(row_width=1)
@@ -180,7 +181,7 @@ if bot:
     # ---------------------------------------------------------
     @bot.message_handler(commands=["admin"])
     def admin_cmd(msg):
-        if msg.from_user.id != ADMIN_ID and ADMIN_ID != 0:
+        if int(msg.from_user.id) != ADMIN_ID and ADMIN_ID != 0:
             bot.reply_to(msg, "❌ Accès refusé. Vous n'êtes pas l'administrateur.")
             return
 
@@ -208,7 +209,7 @@ if bot:
 
     @bot.message_handler(commands=["grant"])
     def grant_access(msg):
-        if msg.from_user.id != ADMIN_ID and ADMIN_ID != 0:
+        if int(msg.from_user.id) != ADMIN_ID and ADMIN_ID != 0:
             return
         try:
             target_id = int(msg.text.split()[1])
@@ -217,15 +218,18 @@ if bot:
                 conn.commit()
             bot.reply_to(msg, f"✅ L'utilisateur `{target_id}` a été validé. Accès Mini App débloqué.")
 
-            markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton("📈 Ouvrir la Mini App Trading", web_app=telebot.types.WebAppInfo(url=URL_MINI_APP)))
-            bot.send_message(target_id, "🎉 **Accès Débloqué !** Votre compte a été validé par l'administrateur. Vous pouvez désormais ouvrir la Mini App.", reply_markup=markup)
+            try:
+                markup = InlineKeyboardMarkup()
+                markup.add(InlineKeyboardButton("📈 Ouvrir la Mini App Trading", web_app=telebot.types.WebAppInfo(url=URL_MINI_APP)))
+                bot.send_message(target_id, "🎉 **Accès Débloqué !** Votre compte a été validé par l'administrateur. Vous pouvez désormais ouvrir la Mini App.", reply_markup=markup)
+            except Exception as e:
+                logger.error(f"Impossible d'envoyer le message de confirmation à {target_id}: {e}")
         except Exception:
             bot.reply_to(msg, "❌ Format incorrect. Utilisation : `/grant 12345678`")
 
     @bot.message_handler(commands=["revoke"])
     def revoke_access(msg):
-        if msg.from_user.id != ADMIN_ID and ADMIN_ID != 0:
+        if int(msg.from_user.id) != ADMIN_ID and ADMIN_ID != 0:
             return
         try:
             target_id = int(msg.text.split()[1])
@@ -233,7 +237,10 @@ if bot:
                 conn.cursor().execute("UPDATE users SET status = 'PENDING', linked_account = NULL WHERE user_id = ?", (target_id,))
                 conn.commit()
             bot.reply_to(msg, f"🚫 Accès révoqué pour l'utilisateur `{target_id}`.")
-            bot.send_message(target_id, "⚠️ Votre accès à la Mini App a été suspendu par l'administrateur.")
+            try:
+                bot.send_message(target_id, "⚠️ Votre accès à la Mini App a été suspendu par l'administrateur.")
+            except Exception:
+                pass
         except Exception:
             bot.reply_to(msg, "❌ Format incorrect. Utilisation : `/revoke 12345678`")
 
@@ -255,7 +262,7 @@ if bot:
     @bot.message_handler(content_types=["photo"], func=lambda m: user_states.get(m.chat.id) == "WAIT_PHOTO")
     def process_proof_photo(msg):
         chat_id = msg.chat.id
-        u_id = msg.from_user.id
+        u_id = int(msg.from_user.id)
         photo_id = msg.photo[-1].file_id
         acc_id = user_temp_data.get(chat_id, {}).get("account_id", "Non spécifié")
 
@@ -280,7 +287,7 @@ if bot:
 
     @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_ok_"))
     def admin_approve(call):
-        if call.from_user.id != ADMIN_ID and ADMIN_ID != 0:
+        if int(call.from_user.id) != ADMIN_ID and ADMIN_ID != 0:
             return
         req_id = int(call.data.replace("adm_ok_", ""))
         with get_db() as conn:
@@ -288,19 +295,22 @@ if bot:
             c.execute("SELECT user_id, account_id FROM pending_validations WHERE id = ?", (req_id,))
             row = c.fetchone()
             if row:
-                u_id = row["user_id"]
-                c.execute("UPDATE users SET status = 'VERIFIED', linked_account = ?, funnel_step = 'COMPLETED' WHERE user_id = ?", (row["account_id"], u_id))
+                u_id = int(row["user_id"])
+                c.execute("UPDATE users SET status = 'VERIFIED', linked_account = ?, funnel_step = 'COMPLETED' WHERE user_id = ?", (str(row["account_id"]), u_id))
                 c.execute("UPDATE pending_validations SET status = 'APPROVED' WHERE id = ?", (req_id,))
                 conn.commit()
                 bot.edit_message_caption(caption="✅ **Demande Approuvée avec succès.**", chat_id=call.message.chat.id, message_id=call.message.message_id)
 
-                mk = InlineKeyboardMarkup()
-                mk.add(InlineKeyboardButton("📈 Ouvrir la Mini App Trading", web_app=telebot.types.WebAppInfo(url=URL_MINI_APP)))
-                bot.send_message(u_id, "🎉 **Félicitations ! Votre compte a été validé !**\nVotre accès complet à la Mini App Trading est débloqué.", reply_markup=mk)
+                try:
+                    mk = InlineKeyboardMarkup()
+                    mk.add(InlineKeyboardButton("📈 Ouvrir la Mini App Trading", web_app=telebot.types.WebAppInfo(url=URL_MINI_APP)))
+                    bot.send_message(u_id, "🎉 **Félicitations ! Votre compte a été validé !**\nVotre accès complet à la Mini App Trading est débloqué.", reply_markup=mk)
+                except Exception as e:
+                    logger.error(f"Erreur envoi notification utilisateur {u_id}: {e}")
 
     @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_no_"))
     def admin_reject(call):
-        if call.from_user.id != ADMIN_ID and ADMIN_ID != 0:
+        if int(call.from_user.id) != ADMIN_ID and ADMIN_ID != 0:
             return
         req_id = int(call.data.replace("adm_no_", ""))
         with get_db() as conn:
@@ -308,11 +318,14 @@ if bot:
             c.execute("SELECT user_id FROM pending_validations WHERE id = ?", (req_id,))
             row = c.fetchone()
             if row:
-                u_id = row["user_id"]
+                u_id = int(row["user_id"])
                 c.execute("UPDATE pending_validations SET status = 'REJECTED' WHERE id = ?", (req_id,))
                 conn.commit()
                 bot.edit_message_caption(caption="❌ **Demande Rejetée.**", chat_id=call.message.chat.id, message_id=call.message.message_id)
-                bot.send_message(u_id, "❌ **Votre demande a été refusée.** Preuve invalide. Veuillez soumettre une preuve valide avec un dépôt minimum de 10$.")
+                try:
+                    bot.send_message(u_id, "❌ **Votre demande a été refusée.** Preuve invalide. Veuillez soumettre une preuve valide avec un dépôt minimum de 10$.")
+                except Exception:
+                    pass
 
 # ---------------------------------------------------------
 # 5. AUTOMATISATION (RELANCES 3H & ALERTES CANAL 1H)
@@ -329,11 +342,11 @@ def run_reminders_3h():
                 mk = InlineKeyboardMarkup(row_width=1)
                 mk.add(InlineKeyboardButton("📥 Envoyer Preuves de Dépôt (10$)", callback_data="submit_proof"))
                 bot.send_message(
-                    u["user_id"],
+                    int(u["user_id"]),
                     "⏰ **RAPPEL : Finalisez votre accès au Terminal IA !**\n\nVous n'avez pas terminé votre inscription. Effectuez un dépôt de 10$ minimum et transmettez votre preuve pour débloquer la Mini App gratuitement !",
                     reply_markup=mk
                 )
-                c.execute("UPDATE users SET last_reminder_sent = ? WHERE user_id = ?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), u["user_id"]))
+                c.execute("UPDATE users SET last_reminder_sent = ? WHERE user_id = ?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), int(u["user_id"])))
             except Exception as e:
                 logger.error(f"Erreur relance 3h pour {u['user_id']}: {e}")
         conn.commit()
@@ -378,7 +391,11 @@ def health():
 @app.route("/api/user-status", methods=["POST"])
 def user_status():
     data = request.json or {}
-    u_id = int(data.get("userId", 0))
+    try:
+        u_id = int(data.get("userId", 0))
+    except (ValueError, TypeError):
+        u_id = 0
+
     if not u_id: return jsonify({"error": "userId obligatoire"}), 400
 
     with get_db() as conn:
@@ -420,8 +437,12 @@ def user_status():
 @app.route("/api/admin/toggle-vip", methods=["POST"])
 def admin_toggle_vip():
     data = request.json or {}
-    admin_id = int(data.get("adminId", 0))
-    target_id = int(data.get("targetId", 0))
+    try:
+        admin_id = int(data.get("adminId", 0))
+        target_id = int(data.get("targetId", 0))
+    except (ValueError, TypeError):
+        return jsonify({"success": False, "error": "IDs invalides"}), 400
+
     action = data.get("action")
 
     if admin_id != ADMIN_ID and ADMIN_ID != 0:
