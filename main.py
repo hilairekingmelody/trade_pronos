@@ -12,9 +12,6 @@ import telebot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 from apscheduler.schedulers.background import BackgroundScheduler
 
-# ---------------------------------------------------------
-# 1. CONFIGURATION & LOGS
-# ---------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("TradingBot")
 
@@ -26,7 +23,6 @@ ADMIN_ID = int(ADMIN_ID_RAW) if ADMIN_ID_RAW.isdigit() else 0
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown") if TOKEN else None
 URL_MINI_APP = os.environ.get("URL_MINI_APP_TRADING", "https://trading-3wcr.onrender.com")
 
-# Liens d'affiliation Exness & KuCoin
 EXNESS_LINK = "https://one.exnessonelink.com/a/395vyusacl"
 EXNESS_PROMO = "395vyusacl"
 KUCOIN_LINK = "https://www.kucoin.com/ucenter/signup?&rcode=rEN8V1E&utm_medium=U17710"
@@ -35,9 +31,6 @@ KUCOIN_PROMO = "rEN8V1E"
 user_states = {}
 user_temp_data = {}
 
-# ---------------------------------------------------------
-# 2. BASE DE DONNÉES SQLITE
-# ---------------------------------------------------------
 DB_FILE = "bot_database.db"
 
 def get_db():
@@ -76,9 +69,6 @@ def init_db():
 
 init_db()
 
-# ---------------------------------------------------------
-# 3. VERIFICATION MEMBRE CANAL (FORCE JOIN)
-# ---------------------------------------------------------
 def check_channel_membership(user_id: int) -> bool:
     if not CHANNEL_ID or not bot or user_id == ADMIN_ID:
         return True
@@ -89,9 +79,6 @@ def check_channel_membership(user_id: int) -> bool:
         logger.error(f"Erreur vérification canal : {e}")
         return False
 
-# ---------------------------------------------------------
-# 4. BOT TELEGRAM, PARCOURS & ADMIN
-# ---------------------------------------------------------
 if bot:
 
     @bot.message_handler(commands=["start"])
@@ -177,9 +164,6 @@ if bot:
     def callback_locked_app(call):
         bot.answer_callback_query(call.id, "🔒 Accès refusé ! Envoyez d'abord vos preuves de dépôt pour que l'administrateur valide votre compte.", show_alert=True)
 
-    # ---------------------------------------------------------
-    # PANNEAU ADMIN (/admin, /grant, /revoke)
-    # ---------------------------------------------------------
     @bot.message_handler(commands=["admin"])
     def admin_cmd(msg):
         if int(msg.from_user.id) != ADMIN_ID and ADMIN_ID != 0:
@@ -246,9 +230,6 @@ if bot:
         except Exception:
             bot.reply_to(msg, "❌ Format incorrect. Utilisation : `/revoke 12345678`")
 
-    # ---------------------------------------------------------
-    # SOUMISSION PREUVES & VALIDATION ADMIN
-    # ---------------------------------------------------------
     @bot.callback_query_handler(func=lambda c: c.data == "submit_proof")
     def submit_proof_start(call):
         user_states[call.message.chat.id] = "WAIT_ID"
@@ -330,9 +311,6 @@ if bot:
                 except Exception:
                     pass
 
-# ---------------------------------------------------------
-# 5. AUTOMATISATION (RELANCES 3H & ALERTES CANAL 1H)
-# ---------------------------------------------------------
 def run_reminders_3h():
     if not bot: return
     limit_time = (datetime.now() - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
@@ -380,9 +358,6 @@ sched.add_job(run_reminders_3h, 'interval', minutes=15)
 sched.add_job(run_market_alerts, 'interval', hours=1)
 sched.start()
 
-# ---------------------------------------------------------
-# 6. SERVEUR FLASK (RENDER & ENDPOINTS WEBAPP)
-# ---------------------------------------------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -399,10 +374,12 @@ def user_status():
     except (ValueError, TypeError):
         u_id = 0
 
-    if not u_id: return jsonify({"error": "userId obligatoire"}), 400
+    if not u_id:
+        return jsonify({"error": "userId obligatoire"}), 400
 
     with get_db() as conn:
         c = conn.cursor()
+        # Cast explicite pour la comparaison
         c.execute("SELECT status, linked_account, referrals_count FROM users WHERE user_id = ?", (u_id,))
         row = c.fetchone()
 
