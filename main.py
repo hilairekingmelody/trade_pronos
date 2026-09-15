@@ -151,9 +151,10 @@ if bot:
                 is_verified = True
 
         markup = InlineKeyboardMarkup(row_width=1)
+        user_app_url = f"{URL_MINI_APP}?uid={u_id}"
 
         if is_verified:
-            markup.add(InlineKeyboardButton("📈 Ouvrir la Mini App Trading", web_app=telebot.types.WebAppInfo(url=URL_MINI_APP)))
+            markup.add(InlineKeyboardButton("📈 Ouvrir la Mini App Trading", web_app=telebot.types.WebAppInfo(url=user_app_url)))
             text = (
                 f"Bienvenue *{u_name}* sur le Terminal de Trading !\n\n"
                 "✅ **Votre compte est vérifié.** Vous pouvez accéder gratuitement à tous les signaux et fonctionnalités de la Mini App ci-dessous :"
@@ -219,8 +220,9 @@ if bot:
             bot.reply_to(msg, f"✅ L'utilisateur `{target_id}` a été validé. Accès Mini App débloqué.")
 
             try:
+                user_app_url = f"{URL_MINI_APP}?uid={target_id}"
                 markup = InlineKeyboardMarkup()
-                markup.add(InlineKeyboardButton("📈 Ouvrir la Mini App Trading", web_app=telebot.types.WebAppInfo(url=URL_MINI_APP)))
+                markup.add(InlineKeyboardButton("📈 Ouvrir la Mini App Trading", web_app=telebot.types.WebAppInfo(url=user_app_url)))
                 bot.send_message(target_id, "🎉 **Accès Débloqué !** Votre compte a été validé par l'administrateur. Vous pouvez désormais ouvrir la Mini App.", reply_markup=markup)
             except Exception as e:
                 logger.error(f"Impossible d'envoyer le message de confirmation à {target_id}: {e}")
@@ -302,8 +304,9 @@ if bot:
                 bot.edit_message_caption(caption="✅ **Demande Approuvée avec succès.**", chat_id=call.message.chat.id, message_id=call.message.message_id)
 
                 try:
+                    user_app_url = f"{URL_MINI_APP}?uid={u_id}"
                     mk = InlineKeyboardMarkup()
-                    mk.add(InlineKeyboardButton("📈 Ouvrir la Mini App Trading", web_app=telebot.types.WebAppInfo(url=URL_MINI_APP)))
+                    mk.add(InlineKeyboardButton("📈 Ouvrir la Mini App Trading", web_app=telebot.types.WebAppInfo(url=user_app_url)))
                     bot.send_message(u_id, "🎉 **Félicitations ! Votre compte a été validé !**\nVotre accès complet à la Mini App Trading est débloqué.", reply_markup=mk)
                 except Exception as e:
                     logger.error(f"Erreur envoi notification utilisateur {u_id}: {e}")
