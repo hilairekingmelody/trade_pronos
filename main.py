@@ -40,9 +40,6 @@ CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID", "@trading_pronos").strip()
 ADMIN_ID_RAW = os.environ.get("ADMIN_ID", "0").strip()
 ADMIN_ID = int(ADMIN_ID_RAW) if ADMIN_ID_RAW.isdigit() else 0
 
-if not TOKEN:
-    logger.warning("⚠️ BOT_TOKEN manquant dans l'environnement !")
-
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown") if TOKEN else None
 
 user_states = {}
@@ -76,7 +73,8 @@ def init_db():
                 referrer_id INTEGER,
                 referrals_count INTEGER DEFAULT 0,
                 last_active TEXT,
-                linked_account TEXT DEFAULT NULL
+                linked_account TEXT DEFAULT NULL,
+                last_reminder_sent TEXT DEFAULT NULL
             )
         """)
         cursor.execute("""
@@ -96,7 +94,7 @@ def init_db():
 init_db()
 
 # ---------------------------------------------------------
-# 3. VERIFICATION FORCE JOIN (CANAL)
+# 3. VERIFICATION CANAL (FORCE JOIN)
 # ---------------------------------------------------------
 def check_channel_membership(user_id: int) -> bool:
     if not CHANNEL_ID or not bot or user_id == ADMIN_ID:
@@ -143,26 +141,6 @@ if bot:
                         "UPDATE users SET referrals_count = referrals_count + 1 WHERE user_id = ?",
                         (referrer_id,),
                     )
-                    cursor.execute(
-                        "SELECT referrals_count FROM users WHERE user_id = ?",
-                        (referrer_id,),
-                    )
-                    ref_row = cursor.fetchone()
-                    if ref_row and ref_row["referrals_count"] % 3 == 0:
-                        new_exp = (datetime.now() + timedelta(days=30)).strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        )
-                        cursor.execute(
-                            "UPDATE users SET status = 'VIP', vip_expiry = ? WHERE user_id = ?",
-                            (new_exp, referrer_id),
-                        )
-                        try:
-                            bot.send_message(
-                                referrer_id,
-                                "🎉 **FÉLICITATIONS !** Vous avez invité 3 amis. Vous gagnez **1 mois VIP gratuit** !",
-                            )
-                        except Exception:
-                            pass
                 conn.commit()
                 status = "FREE"
             else:
@@ -173,7 +151,7 @@ if bot:
                 )
                 conn.commit()
 
-        # OBLIGATION DE REJOINDRE LE CANAL AVANT TOUT
+        # OBLIGATION DE REJOINDRE LE CANAL
         if not check_channel_membership(user_id):
             markup = InlineKeyboardMarkup()
             clean_channel = CHANNEL_ID.replace("@", "")
@@ -189,7 +167,7 @@ if bot:
             )
             bot.reply_to(
                 msg,
-                "🔒 **ACCÈS RESTREINT**\n\nVous devez obligatoirement rejoindre notre canal officiel pour pouvoir accéder au bot et aux signaux de trading.",
+                "🔒 **ACCÈS RESTREINT**\n\nVous devez obligatoirement rejoindre notre canal officiel pour pouvoir accéder au bot et aux signaux.",
                 reply_markup=markup,
             )
             return
@@ -240,75 +218,6 @@ if bot:
         )
 
     # ---------------------------------------------------------
-    # ADMIN COMMANDS
-    # ---------------------------------------------------------
-    @bot.message_handler(commands=["admin"])
-    def admin_cmd(msg):
-        user_id = msg.from_user.id
-        if user_id != ADMIN_ID:
-            bot.reply_to(msg, "❌ **Accès refusé.**")
-            return
-        send_admin_dashboard(msg.chat.id)
-
-    def send_admin_dashboard(chat_id):
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) as total FROM users")
-            total_users = cursor.fetchone()["total"]
-            cursor.execute("SELECT COUNT(*) as vip FROM users WHERE status = 'VIP'")
-            vip_users = cursor.fetchone()["vip"]
-
-        text = (
-            "🛠️ **PANNEAU D'ADMINISTRATION**\n\n"
-            f"👥 **Utilisateurs Totaux :** `{total_users}`\n"
-            f"👑 **Membres VIP Actifs :** `{vip_users}`\n"
-        )
-        markup = InlineKeyboardMarkup()
-        markup.add(
-            InlineKeyboardButton("➕ Donner VIP Manuellement", callback_data="adm_grant_manual"),
-            InlineKeyboardButton("➖ Retirer VIP Manuellement", callback_data="adm_revoke_manual")
-        )
-        bot.send_message(chat_id, text, reply_markup=markup)
-
-    @bot.callback_query_handler(func=lambda call: call.data in ["adm_grant_manual", "adm_revoke_manual"])
-    def admin_manual_action(call):
-        if call.from_user.id != ADMIN_ID:
-            return
-        action = call.data
-        user_states[call.message.chat.id] = action
-        bot.answer_callback_query(call.id)
-        prompt_text = "✏️ Entrez l'**ID Telegram** de l'utilisateur :"
-        bot.send_message(call.message.chat.id, prompt_text)
-
-    @bot.message_handler(func=lambda msg: user_states.get(msg.chat.id) in ["adm_grant_manual", "adm_revoke_manual"])
-    def process_admin_input(msg):
-        if msg.from_user.id != ADMIN_ID:
-            return
-        action = user_states.get(msg.chat.id)
-        target_id_str = msg.text.strip()
-        if not target_id_str.isdigit():
-            bot.reply_to(msg, "❌ ID invalide.")
-            user_states[msg.chat.id] = None
-            return
-
-        target_id = int(target_id_str)
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (target_id,))
-            if not cursor.fetchone():
-                cursor.execute("INSERT INTO users (user_id, username, status) VALUES (?, 'Inconnu', 'FREE')", (target_id,))
-
-            if action == "adm_grant_manual":
-                expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
-                cursor.execute("UPDATE users SET status = 'VIP', vip_expiry = ? WHERE user_id = ?", (expiry, target_id))
-                bot.reply_to(msg, f"✅ Accès VIP accordé à `{target_id}`.")
-            elif action == "adm_revoke_manual":
-                cursor.execute("UPDATE users SET status = 'FREE', vip_expiry = NULL WHERE user_id = ?", (target_id,))
-                bot.reply_to(msg, f"🔴 Accès VIP retiré pour `{target_id}`.")
-            conn.commit()
-        user_states[msg.chat.id] = None
-
-    # ---------------------------------------------------------
     # PROOF SUBMISSION & ADMIN APPROVAL
     # ---------------------------------------------------------
     @bot.callback_query_handler(func=lambda call: call.data == "submit_proof")
@@ -339,6 +248,7 @@ if bot:
                 "INSERT INTO pending_validations (user_id, universe, account_id, photo_id, created_at) VALUES (?, 'trading', ?, ?, ?)",
                 (user_id, account_id, photo_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
             )
+            cursor.execute("UPDATE users SET funnel_step = 'PROOFS_SENT' WHERE user_id = ?", (user_id,))
             req_id = cursor.lastrowid
             conn.commit()
 
@@ -412,7 +322,7 @@ if bot:
         bot.send_message(chat_id, f"{prefix}Accédez au terminal complet ci-dessous :", reply_markup=markup)
 
     # ---------------------------------------------------------
-    # TELEGRAM STARS INVOICING & WEBAPP LINKING
+    # TELEGRAM STARS INVOICING
     # ---------------------------------------------------------
     @bot.callback_query_handler(func=lambda call: call.data.startswith("pay_stars_"))
     def process_stars_payment(call):
@@ -451,7 +361,81 @@ if bot:
         send_app_access(msg.chat.id, congrats=True)
 
 # ---------------------------------------------------------
-# 5. API FLASK & GESTION NATIVE DU PAIEMENT STARS
+# 5. TÂCHES AUTOMATIQUES (RELANCES 3H & ALERTES MARCHÉ)
+# ---------------------------------------------------------
+def send_3h_reminders():
+    """Envoie une relance aux utilisateurs bloqués depuis plus de 3h."""
+    if not bot:
+        return
+    now = datetime.now()
+    three_hours_ago = (now - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT user_id FROM users 
+            WHERE status = 'FREE' 
+              AND funnel_step = 'STARTED' 
+              AND last_active <= ? 
+              AND last_reminder_sent IS NULL
+        """, (three_hours_ago,))
+        pending_users = cursor.fetchall()
+
+        for user in pending_users:
+            u_id = user["user_id"]
+            try:
+                markup = InlineKeyboardMarkup()
+                markup.add(InlineKeyboardButton("📤 Finaliser l'inscription VIP", callback_data="submit_proof"))
+                bot.send_message(
+                    u_id,
+                    "⏰ **N'OUBLIEZ PAS VOTRE ACCÈS VIP !**\n\n"
+                    "Il vous suffit d'effectuer un dépôt de **10 $** chez l'un de nos partenaires pour débloquer **100% des signaux** et des TP/SL sur le terminal.\n\n"
+                    "Cliquez ci-dessous pour nous envoyer vos preuves :",
+                    reply_markup=markup
+                )
+                cursor.execute("UPDATE users SET last_reminder_sent = ? WHERE user_id = ?", (now.strftime("%Y-%m-%d %H:%M:%S"), u_id))
+            except Exception as e:
+                logger.error(f"Échec relance pour {u_id}: {e}")
+        conn.commit()
+
+def publish_market_alerts():
+    """Récupère les prix de BTC, ETH et EUR/USD et les publie dans le canal."""
+    if not bot or not CHANNEL_ID:
+        return
+    try:
+        # Récupération Crypto via CoinGecko
+        cg_res = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd&include_24hr_change=true", timeout=10).json()
+        btc_price = cg_res.get("bitcoin", {}).get("usd", 0)
+        btc_change = cg_res.get("bitcoin", {}).get("usd_24h_change", 0)
+        eth_price = cg_res.get("ethereum", {}).get("usd", 0)
+        eth_change = cg_res.get("ethereum", {}).get("usd_24h_change", 0)
+
+        # Récupération EUR/USD via Frankfurter API
+        fx_res = requests.get("https://api.frankfurter.app/latest?from=EUR&to=USD", timeout=10).json()
+        eur_usd = fx_res.get("rates", {}).get("USD", 0)
+
+        btc_icon = "🟢" if btc_change >= 0 else "🔴"
+        eth_icon = "🟢" if eth_change >= 0 else "🔴"
+
+        msg = (
+            "📊 **UPDATE MARCHÉ EN TEMPS RÉEL**\n\n"
+            f"🪙 **Bitcoin (BTC) :** `{btc_price:,.2f} $` ({btc_icon} {btc_change:+.2f}%)\n"
+            f"💎 **Ethereum (ETH) :** `{eth_price:,.2f} $` ({eth_icon} {eth_change:+.2f}%)\n"
+            f"💱 **EUR / USD :** `{eur_usd:.4f}`\n\n"
+            "📈 *Consultez votre Mini App pour voir les signaux IA associés !*"
+        )
+        bot.send_message(CHANNEL_ID, msg)
+    except Exception as e:
+        logger.error(f"Erreur publication alerte marché: {e}")
+
+# Lancement du planificateur en arrière-plan
+scheduler = BackgroundScheduler(daemon=True)
+scheduler.add_job(send_3h_reminders, 'interval', minutes=15) # Vérifie toutes les 15 min
+scheduler.add_job(publish_market_alerts, 'interval', hours=1) # Alerte marché toutes les heures
+scheduler.start()
+
+# ---------------------------------------------------------
+# 6. API FLASK & ROUTE WEBHOOK / HEALTH
 # ---------------------------------------------------------
 app = Flask(__name__)
 CORS(app)
@@ -461,7 +445,6 @@ CORS(app)
 def health_check():
     return jsonify({"status": "online", "message": "Bot & API Opérationnels"}), 200
 
-# Route générant le lien de facture Telegram Stars pour la WebApp
 @app.route("/api/create-stars-invoice", methods=["POST"])
 def create_stars_invoice():
     data = request.json or {}
@@ -477,7 +460,7 @@ def create_stars_invoice():
             title="Pass VIP Terminal Trading (1 Mois)",
             description="Déblocage complet des TP1, TP2, Stop Loss et signaux IA pour 30 jours.",
             payload="vip_stars_500",
-            provider_token="", # Vide pour Telegram Stars
+            provider_token="",
             currency="XTR",
             prices=prices
         )
