@@ -15,6 +15,7 @@ from telebot.types import (
     InlineKeyboardMarkup,
     LabeledPrice,
 )
+from flask_cors import CORS
 from apscheduler.schedulers.background import BackgroundScheduler
 
 # ---------------------------------------------------------
@@ -74,7 +75,8 @@ def init_db():
                 vip_expiry TEXT,
                 referrer_id INTEGER,
                 referrals_count INTEGER DEFAULT 0,
-                last_active TEXT
+                last_active TEXT,
+                linked_account TEXT DEFAULT NULL
             )
         """)
         cursor.execute("""
@@ -104,7 +106,7 @@ def check_channel_membership(user_id: int) -> bool:
         return member.status in ["creator", "administrator", "member"]
     except Exception as e:
         logger.error(f"Erreur contrôle canal : {e}")
-        return True
+        return False
 
 # ---------------------------------------------------------
 # 4. PARCOURS UTILISATEUR & COMMANDES
@@ -171,12 +173,13 @@ if bot:
                 )
                 conn.commit()
 
+        # OBLIGATION DE REJOINDRE LE CANAL AVANT TOUT
         if not check_channel_membership(user_id):
             markup = InlineKeyboardMarkup()
             clean_channel = CHANNEL_ID.replace("@", "")
             markup.add(
                 InlineKeyboardButton(
-                    "📢 Rejoindre le Canal", url=f"https://t.me/{clean_channel}"
+                    "📢 Rejoindre le Canal Officiel", url=f"https://t.me/{clean_channel}"
                 )
             )
             markup.add(
@@ -186,7 +189,7 @@ if bot:
             )
             bot.reply_to(
                 msg,
-                "🔒 **ACCÈS RESTREINT**\n\nVous devez obligATOIREMENT rejoindre notre canal officiel pour continuer.",
+                "🔒 **ACCÈS RESTREINT**\n\nVous devez obligatoirement rejoindre notre canal officiel pour pouvoir accéder au bot et aux signaux de trading.",
                 reply_markup=markup,
             )
             return
@@ -196,122 +199,6 @@ if bot:
             return
 
         send_trading_funnel(msg.chat.id)
-
-    # ---------------------------------------------------------
-    # COMMAND /ADMIN POUR LE PANNEAU DE CONTRÔLE
-    # ---------------------------------------------------------
-    @bot.message_handler(commands=["admin"])
-    def admin_cmd(msg):
-        user_id = msg.from_user.id
-        if user_id != ADMIN_ID:
-            bot.reply_to(msg, "❌ **Accès refusé.** Cette commande est réservée à l'administrateur.")
-            return
-
-        send_admin_dashboard(msg.chat.id)
-
-    def send_admin_dashboard(chat_id):
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) as total FROM users")
-            total_users = cursor.fetchone()["total"]
-
-            cursor.execute("SELECT COUNT(*) as vip FROM users WHERE status = 'VIP'")
-            vip_users = cursor.fetchone()["vip"]
-
-        text = (
-            "🛠️ **PANNEAU D'ADMINISTRATION**\n\n"
-            f"👥 **Utilisateurs Totaux :** `{total_users}`\n"
-            f"👑 **Membres VIP Actifs :** `{vip_users}`\n\n"
-            "Sélectionnez une action ci-dessous :"
-        )
-
-        markup = InlineKeyboardMarkup()
-        markup.add(
-            InlineKeyboardButton("➕ Donner VIP Manuellement", callback_data="adm_grant_manual"),
-            InlineKeyboardButton("➖ Retirer VIP Manuellement", callback_data="adm_revoke_manual")
-        )
-        markup.add(InlineKeyboardButton("🔄 Rafraîchir les Stats", callback_data="adm_refresh_stats"))
-
-        bot.send_message(chat_id, text, reply_markup=markup)
-
-    @bot.callback_query_handler(func=lambda call: call.data == "adm_refresh_stats")
-    def admin_refresh(call):
-        if call.from_user.id != ADMIN_ID:
-            return
-        bot.answer_callback_query(call.id, "Mise à jour des stats...")
-        try:
-            bot.delete_message(call.message.chat.id, call.message.message_id)
-        except Exception:
-            pass
-        send_admin_dashboard(call.message.chat.id)
-
-    @bot.callback_query_handler(func=lambda call: call.data in ["adm_grant_manual", "adm_revoke_manual"])
-    def admin_manual_action(call):
-        if call.from_user.id != ADMIN_ID:
-            return
-
-        action = call.data
-        user_states[call.message.chat.id] = action
-        bot.answer_callback_query(call.id)
-
-        prompt_text = (
-            "✏️ Entrez l'**ID Telegram** de l'utilisateur à passer en VIP (30 jours) :"
-            if action == "adm_grant_manual"
-            else "✏️ Entrez l'**ID Telegram** de l'utilisateur auquel retirer le VIP :"
-        )
-        bot.send_message(call.message.chat.id, prompt_text)
-
-    @bot.message_handler(func=lambda msg: user_states.get(msg.chat.id) in ["adm_grant_manual", "adm_revoke_manual"])
-    def process_admin_input(msg):
-        if msg.from_user.id != ADMIN_ID:
-            return
-
-        action = user_states.get(msg.chat.id)
-        target_id_str = msg.text.strip()
-
-        if not target_id_str.isdigit():
-            bot.reply_to(msg, "❌ ID invalide. Veuillez entrer un nombre entier.")
-            user_states[msg.chat.id] = None
-            return
-
-        target_id = int(target_id_str)
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (target_id,))
-            user_exists = cursor.fetchone()
-
-            if not user_exists:
-                cursor.execute(
-                    "INSERT INTO users (user_id, username, status) VALUES (?, 'Inconnu', 'FREE')",
-                    (target_id,)
-                )
-
-            if action == "adm_grant_manual":
-                expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
-                cursor.execute(
-                    "UPDATE users SET status = 'VIP', vip_expiry = ? WHERE user_id = ?",
-                    (expiry, target_id)
-                )
-                conn.commit()
-                bot.reply_to(msg, f"✅ Accès VIP (30 jours) accordé avec succès à `{target_id}`.")
-                try:
-                    bot.send_message(target_id, "🎉 Un administrateur vous a attribué **1 mois d'accès VIP gratuit** !")
-                except Exception:
-                    pass
-
-            elif action == "adm_revoke_manual":
-                cursor.execute(
-                    "UPDATE users SET status = 'FREE', vip_expiry = NULL WHERE user_id = ?",
-                    (target_id,)
-                )
-                conn.commit()
-                bot.reply_to(msg, f"🔴 Accès VIP retiré avec succès pour `{target_id}`.")
-                try:
-                    bot.send_message(target_id, "ℹ️ Votre accès VIP a été révoqué par un administrateur.")
-                except Exception:
-                    pass
-
-        user_states[msg.chat.id] = None
 
     @bot.callback_query_handler(func=lambda call: call.data == "check_join")
     def callback_check_join(call):
@@ -353,164 +240,163 @@ if bot:
         )
 
     # ---------------------------------------------------------
-    # 5. DEMANDE & VALIDATION PROOF
+    # ADMIN COMMANDS
+    # ---------------------------------------------------------
+    @bot.message_handler(commands=["admin"])
+    def admin_cmd(msg):
+        user_id = msg.from_user.id
+        if user_id != ADMIN_ID:
+            bot.reply_to(msg, "❌ **Accès refusé.**")
+            return
+        send_admin_dashboard(msg.chat.id)
+
+    def send_admin_dashboard(chat_id):
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) as total FROM users")
+            total_users = cursor.fetchone()["total"]
+            cursor.execute("SELECT COUNT(*) as vip FROM users WHERE status = 'VIP'")
+            vip_users = cursor.fetchone()["vip"]
+
+        text = (
+            "🛠️ **PANNEAU D'ADMINISTRATION**\n\n"
+            f"👥 **Utilisateurs Totaux :** `{total_users}`\n"
+            f"👑 **Membres VIP Actifs :** `{vip_users}`\n"
+        )
+        markup = InlineKeyboardMarkup()
+        markup.add(
+            InlineKeyboardButton("➕ Donner VIP Manuellement", callback_data="adm_grant_manual"),
+            InlineKeyboardButton("➖ Retirer VIP Manuellement", callback_data="adm_revoke_manual")
+        )
+        bot.send_message(chat_id, text, reply_markup=markup)
+
+    @bot.callback_query_handler(func=lambda call: call.data in ["adm_grant_manual", "adm_revoke_manual"])
+    def admin_manual_action(call):
+        if call.from_user.id != ADMIN_ID:
+            return
+        action = call.data
+        user_states[call.message.chat.id] = action
+        bot.answer_callback_query(call.id)
+        prompt_text = "✏️ Entrez l'**ID Telegram** de l'utilisateur :"
+        bot.send_message(call.message.chat.id, prompt_text)
+
+    @bot.message_handler(func=lambda msg: user_states.get(msg.chat.id) in ["adm_grant_manual", "adm_revoke_manual"])
+    def process_admin_input(msg):
+        if msg.from_user.id != ADMIN_ID:
+            return
+        action = user_states.get(msg.chat.id)
+        target_id_str = msg.text.strip()
+        if not target_id_str.isdigit():
+            bot.reply_to(msg, "❌ ID invalide.")
+            user_states[msg.chat.id] = None
+            return
+
+        target_id = int(target_id_str)
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (target_id,))
+            if not cursor.fetchone():
+                cursor.execute("INSERT INTO users (user_id, username, status) VALUES (?, 'Inconnu', 'FREE')", (target_id,))
+
+            if action == "adm_grant_manual":
+                expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+                cursor.execute("UPDATE users SET status = 'VIP', vip_expiry = ? WHERE user_id = ?", (expiry, target_id))
+                bot.reply_to(msg, f"✅ Accès VIP accordé à `{target_id}`.")
+            elif action == "adm_revoke_manual":
+                cursor.execute("UPDATE users SET status = 'FREE', vip_expiry = NULL WHERE user_id = ?", (target_id,))
+                bot.reply_to(msg, f"🔴 Accès VIP retiré pour `{target_id}`.")
+            conn.commit()
+        user_states[msg.chat.id] = None
+
+    # ---------------------------------------------------------
+    # PROOF SUBMISSION & ADMIN APPROVAL
     # ---------------------------------------------------------
     @bot.callback_query_handler(func=lambda call: call.data == "submit_proof")
     def start_proof_submission(call):
         chat_id = call.message.chat.id
         user_states[chat_id] = "WAITING_ID"
         user_temp_data[chat_id] = {}
-
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE users SET funnel_step = 'SUBMITTING_ID' WHERE user_id = ?",
-                (call.from_user.id,),
-            )
-            conn.commit()
-
         bot.answer_callback_query(call.id)
-        bot.send_message(
-            chat_id,
-            "📝 **Étape 1/2 :** Entrez votre **ID de compte** Exness ou KuCoin :",
-        )
+        bot.send_message(chat_id, "📝 **Étape 1/2 :** Entrez votre **ID de compte** Exness ou KuCoin :")
 
     @bot.message_handler(func=lambda msg: user_states.get(msg.chat.id) == "WAITING_ID")
     def process_account_id(msg):
         chat_id = msg.chat.id
         user_temp_data[chat_id]["account_id"] = msg.text.strip()
         user_states[chat_id] = "WAITING_PHOTO"
-        bot.reply_to(
-            msg,
-            "📸 **Étape 2/2 :** Envoyez la **capture d'écran** confirmant votre dépôt de 10$.",
-        )
+        bot.reply_to(msg, "📸 **Étape 2/2 :** Envoyez la **capture d'écran** de votre dépôt de 10$.")
 
-    @bot.message_handler(
-        content_types=["photo"],
-        func=lambda msg: user_states.get(msg.chat.id) == "WAITING_PHOTO",
-    )
+    @bot.message_handler(content_types=["photo"], func=lambda msg: user_states.get(msg.chat.id) == "WAITING_PHOTO")
     def process_proof_photo(msg):
         chat_id = msg.chat.id
         user_id = msg.from_user.id
         photo_id = msg.photo[-1].file_id
-
-        data = user_temp_data.get(chat_id, {})
-        account_id = data.get("account_id", "Inconnu")
+        account_id = user_temp_data.get(chat_id, {}).get("account_id", "Inconnu")
 
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO pending_validations (user_id, universe, account_id, photo_id, created_at) VALUES (?, 'trading', ?, ?, ?)",
-                (
-                    user_id,
-                    account_id,
-                    photo_id,
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                ),
+                (user_id, account_id, photo_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
             )
             req_id = cursor.lastrowid
-            cursor.execute(
-                "UPDATE users SET funnel_step = 'PROOF_SUBMITTED' WHERE user_id = ?",
-                (user_id,),
-            )
             conn.commit()
 
         user_states[chat_id] = None
-        user_temp_data[chat_id] = None
-
-        bot.reply_to(
-            msg,
-            "✅ **Preuves transmises !** L'administration va vérifier vos informations rapidement.",
-        )
+        bot.reply_to(msg, "✅ **Preuves transmises !** Vérification en cours par l'administrateur.")
 
         if ADMIN_ID != 0:
             markup = InlineKeyboardMarkup()
             markup.add(
-                InlineKeyboardButton(
-                    "✅ Valider (VIP 30J)", callback_data=f"adm_accept_{req_id}"
-                ),
-                InlineKeyboardButton(
-                    "❌ Rejeter", callback_data=f"adm_reject_{req_id}"
-                ),
+                InlineKeyboardButton("✅ Valider (VIP 30J)", callback_data=f"adm_accept_{req_id}"),
+                InlineKeyboardButton("❌ Rejeter", callback_data=f"adm_reject_{req_id}")
             )
-            admin_text = (
-                f"🔔 **DEMANDE D'ACCÈS VIP TRADING**\n\n"
-                f"👤 **Utilisateur :** `{user_id}` (@{msg.from_user.username or 'Sans pseudo'})\n"
-                f"🆔 **ID Compte :** `{account_id}`"
-            )
+            admin_text = f"🔔 **DEMANDE VIP**\n👤 User: `{user_id}`\n🆔 Compte: `{account_id}`"
             bot.send_photo(ADMIN_ID, photo_id, caption=admin_text, reply_markup=markup)
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith("adm_accept_"))
     def admin_accept(call):
         if call.from_user.id != ADMIN_ID:
             return
-
         req_id = int(call.data.replace("adm_accept_", ""))
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT user_id FROM pending_validations WHERE id = ?", (req_id,)
-            )
+            cursor.execute("SELECT user_id, account_id FROM pending_validations WHERE id = ?", (req_id,))
             row = cursor.fetchone()
-
             if row:
                 target_id = row["user_id"]
-                expiry = (datetime.now() + timedelta(days=30)).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
+                account_id = row["account_id"]
+                expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
 
                 cursor.execute(
-                    "UPDATE users SET status = 'VIP', vip_expiry = ?, funnel_step = 'COMPLETED' WHERE user_id = ?",
-                    (expiry, target_id),
+                    "UPDATE users SET status = 'VIP', vip_expiry = ?, linked_account = ?, funnel_step = 'COMPLETED' WHERE user_id = ?",
+                    (expiry, account_id, target_id),
                 )
-                cursor.execute(
-                    "UPDATE pending_validations SET status = 'APPROVED' WHERE id = ?",
-                    (req_id,),
-                )
+                cursor.execute("UPDATE pending_validations SET status = 'APPROVED' WHERE id = ?", (req_id,))
                 conn.commit()
 
                 bot.answer_callback_query(call.id, "Validé !")
-                bot.edit_message_caption(
-                    chat_id=call.message.chat.id,
-                    message_id=call.message.message_id,
-                    caption=f"{call.message.caption}\n\n✅ **STATUT : APPROUVÉ**",
-                )
-
+                bot.edit_message_caption(chat_id=call.message.chat.id, message_id=call.message.message_id, caption=f"{call.message.caption}\n\n✅ **STATUT : APPROUVÉ**")
                 send_app_access(target_id, congrats=True)
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith("adm_reject_"))
     def admin_reject(call):
         if call.from_user.id != ADMIN_ID:
             return
-
         req_id = int(call.data.replace("adm_reject_", ""))
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT user_id FROM pending_validations WHERE id = ?", (req_id,)
-            )
+            cursor.execute("SELECT user_id FROM pending_validations WHERE id = ?", (req_id,))
             row = cursor.fetchone()
-
             if row:
                 target_id = row["user_id"]
-                cursor.execute(
-                    "UPDATE pending_validations SET status = 'REJECTED' WHERE id = ?",
-                    (req_id,),
-                )
+                cursor.execute("UPDATE pending_validations SET status = 'REJECTED' WHERE id = ?", (req_id,))
                 conn.commit()
 
                 bot.answer_callback_query(call.id, "Refusé.")
-                bot.edit_message_caption(
-                    chat_id=call.message.chat.id,
-                    message_id=call.message.message_id,
-                    caption=f"{call.message.caption}\n\n❌ **STATUT : REFUSÉ**",
-                )
-
+                bot.edit_message_caption(chat_id=call.message.chat.id, message_id=call.message.message_id, caption=f"{call.message.caption}\n\n❌ **STATUT : REFUSÉ**")
                 try:
-                    bot.send_message(
-                        target_id,
-                        "❌ **Demande Rejetée :** Vos preuves n'ont pas pu être vérifiées. Assurez-vous d'utiliser notre lien/code promo et d'effectuer le dépôt.",
-                    )
+                    bot.send_message(target_id, "❌ **Demande Rejetée :** Preuves invalides.")
                 except Exception:
                     pass
 
@@ -522,24 +408,16 @@ if bot:
                 web_app=telebot.types.WebAppInfo(url=URL_MINI_APP_TRADING),
             )
         )
-
-        prefix = (
-            "🎉 **FÉLICITATIONS ! Votre compte est validé.**\n\n" if congrats else ""
-        )
-        bot.send_message(
-            chat_id,
-            f"{prefix}Accédez au terminal complet en cliquant ci-dessous :",
-            reply_markup=markup,
-        )
+        prefix = "🎉 **FÉLICITATIONS ! Votre compte est validé.**\n\n" if congrats else ""
+        bot.send_message(chat_id, f"{prefix}Accédez au terminal complet ci-dessous :", reply_markup=markup)
 
     # ---------------------------------------------------------
-    # 6. PAIEMENT TELEGRAM STARS (1 MOIS = 500 STARS)
+    # TELEGRAM STARS INVOICING & WEBAPP LINKING
     # ---------------------------------------------------------
     @bot.callback_query_handler(func=lambda call: call.data.startswith("pay_stars_"))
     def process_stars_payment(call):
         stars_amount = int(call.data.replace("pay_stars_", ""))
         bot.answer_callback_query(call.id)
-
         prices = [LabeledPrice(label="Pass VIP Terminal Trading (1 Mois)", amount=stars_amount)]
 
         bot.send_invoice(
@@ -552,29 +430,6 @@ if bot:
             prices=prices,
             start_parameter="vip-pay",
         )
-
-    # Interception du message envoyé par WebApp (tg.sendData)
-    @bot.message_handler(content_types=['web_app_data'])
-    def handle_web_app_data(msg):
-        try:
-            data = json.loads(msg.web_app_data.data)
-
-            if data.get("action") == "buy_vip":
-                stars_amount = data.get("stars", 500)
-                prices = [LabeledPrice(label="Pass VIP Terminal Trading (1 Mois)", amount=stars_amount)]
-
-                bot.send_invoice(
-                    msg.chat.id,
-                    title="Pass VIP Terminal Trading (1 Mois)",
-                    description="Déblocage complet des TP1, TP2, Stop Loss et signaux IA pour 30 jours.",
-                    invoice_payload="vip_stars_500",
-                    provider_token="", # Laisser vide pour Telegram Stars
-                    currency="XTR",     # Monnaie Telegram Stars
-                    prices=prices,
-                    start_parameter="vip-pay"
-                )
-        except Exception as e:
-            logger.error(f"Erreur réception WebApp Data : {e}")
 
     @bot.pre_checkout_query_handler(func=lambda query: True)
     def checkout(pre_checkout_query):
@@ -596,68 +451,40 @@ if bot:
         send_app_access(msg.chat.id, congrats=True)
 
 # ---------------------------------------------------------
-# 7. AUTOMATISATIONS & RELANCES (TOUTES LES 3H)
-# ---------------------------------------------------------
-def send_funnel_reminders():
-    if not bot:
-        return
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT user_id FROM users WHERE status = 'FREE' AND funnel_step != 'COMPLETED'"
-        )
-        rows = cursor.fetchall()
-
-        for row in rows:
-            user_id = row["user_id"]
-            msg = (
-                "⏳ **Rappel Trading :**\n\n"
-                "Ne manquez pas les meilleures opportunités du marché ! Complétez votre inscription Exness/KuCoin ou débloquez directement votre Pass VIP pour 500 Stars."
-            )
-            try:
-                bot.send_message(user_id, msg)
-                time.sleep(0.05)
-            except Exception:
-                pass
-
-def publish_crypto_market_alert():
-    if not CHANNEL_ID or not bot:
-        return
-    try:
-        res = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd&include_24hr_change=true",
-            timeout=10,
-        ).json()
-        btc_p, btc_c = res["bitcoin"]["usd"], res["bitcoin"]["usd_24h_change"]
-        eth_p, eth_c = res["ethereum"]["usd"], res["ethereum"]["usd_24h_change"]
-
-        b_i = "🟢" if btc_c >= 0 else "🔴"
-        e_i = "🟢" if eth_c >= 0 else "🔴"
-
-        msg = (
-            "📊 **ANALYSE DU MARCHÉ CRYPTO EN TEMPS RÉEL**\n\n"
-            f"🪙 **BTC/USD :** `{btc_p} $` ({b_i} {btc_c:.2f}%)\n"
-            f"🔹 **ETH/USD :** `{eth_p} $` ({e_i} {eth_c:.2f}%)\n\n"
-            "🔥 *Détectez les opportunités d'achat et de vente instantanément sur notre Mini App !"
-        )
-        bot.send_message(CHANNEL_ID, msg)
-    except Exception as e:
-        logger.error(f"Erreur alerte crypto : {e}")
-
-scheduler = BackgroundScheduler(daemon=True)
-scheduler.add_job(send_funnel_reminders, "interval", hours=3)
-scheduler.add_job(publish_crypto_market_alert, "interval", hours=4)
-scheduler.start()
-
-# ---------------------------------------------------------
-# 8. API FLASK & HEALTH CHECK (RENDER + UPTIMEROBOT)
+# 5. API FLASK & GESTION NATIVE DU PAIEMENT STARS
 # ---------------------------------------------------------
 app = Flask(__name__)
+CORS(app)
 
 @app.route("/", methods=["GET"])
 @app.route("/health", methods=["GET"])
 def health_check():
-    return jsonify({"status": "online", "message": "Bot Telegram & API Web Services Opérationnels"}), 200
+    return jsonify({"status": "online", "message": "Bot & API Opérationnels"}), 200
+
+# Route générant le lien de facture Telegram Stars pour la WebApp
+@app.route("/api/create-stars-invoice", methods=["POST"])
+def create_stars_invoice():
+    data = request.json or {}
+    user_id = data.get("userId")
+    stars = data.get("stars", 500)
+
+    if not user_id or not bot:
+        return jsonify({"error": "Paramètres manquants ou Bot inactif"}), 400
+
+    try:
+        prices = [LabeledPrice(label="Pass VIP Terminal Trading (1 Mois)", amount=int(stars))]
+        invoice_link = bot.create_invoice_link(
+            title="Pass VIP Terminal Trading (1 Mois)",
+            description="Déblocage complet des TP1, TP2, Stop Loss et signaux IA pour 30 jours.",
+            payload="vip_stars_500",
+            provider_token="", # Vide pour Telegram Stars
+            currency="XTR",
+            prices=prices
+        )
+        return jsonify({"success": True, "invoiceUrl": invoice_link})
+    except Exception as e:
+        logger.error(f"Erreur création facture Stars: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/user-status", methods=["POST"])
 def get_user_status():
@@ -672,7 +499,7 @@ def get_user_status():
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT status, vip_expiry, referrals_count FROM users WHERE user_id = ?", (user_id_int,)
+            "SELECT status, vip_expiry, referrals_count, linked_account FROM users WHERE user_id = ?", (user_id_int,)
         )
         row = cursor.fetchone()
 
@@ -683,15 +510,15 @@ def get_user_status():
         vip_users = cursor.fetchone()["vip"]
 
         if not row:
-            return jsonify(
-                {
-                    "status": "UNREGISTERED",
-                    "isVip": (user_id_int == ADMIN_ID),
-                    "isAdmin": (user_id_int == ADMIN_ID),
-                    "referralsCount": 0,
-                    "stats": {"totalUsers": total_users, "vipUsers": vip_users}
-                }
-            )
+            return jsonify({
+                "status": "UNREGISTERED",
+                "isVip": (user_id_int == ADMIN_ID),
+                "isAdmin": (user_id_int == ADMIN_ID),
+                "isLinked": False,
+                "linkedAccount": None,
+                "referralsCount": 0,
+                "stats": {"totalUsers": total_users, "vipUsers": vip_users}
+            })
 
         is_vip = False
         if row["status"] == "VIP":
@@ -711,40 +538,18 @@ def get_user_status():
         if user_id_int == ADMIN_ID:
             is_vip = True
 
-        return jsonify(
-            {
-                "status": "VIP" if is_vip else "FREE",
-                "isVip": is_vip,
-                "isAdmin": (user_id_int == ADMIN_ID),
-                "referralsCount": row["referrals_count"] or 0,
-                "stats": {"totalUsers": total_users, "vipUsers": vip_users}
-            }
-        )
+        linked_acc = row["linked_account"]
+        is_linked = True if (linked_acc or is_vip) else False
 
-@app.route("/api/admin/toggle-vip", methods=["POST"])
-def toggle_vip():
-    data = request.json or {}
-    admin_id = data.get("adminId")
-    target_id = data.get("targetId")
-    action = data.get("action")
-
-    if int(admin_id) != ADMIN_ID:
-        return jsonify({"error": "Accès non autorisé"}), 403
-
-    if not target_id:
-        return jsonify({"error": "ID cible manquant"}), 400
-
-    target_id_int = int(target_id)
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        if action == "grant":
-            expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
-            cursor.execute("UPDATE users SET status = 'VIP', vip_expiry = ? WHERE user_id = ?", (expiry, target_id_int))
-        else:
-            cursor.execute("UPDATE users SET status = 'FREE', vip_expiry = NULL WHERE user_id = ?", (target_id_int,))
-        conn.commit()
-
-    return jsonify({"success": True, "message": "Statut mis à jour !"})
+        return jsonify({
+            "status": "VIP" if is_vip else "FREE",
+            "isVip": is_vip,
+            "isAdmin": (user_id_int == ADMIN_ID),
+            "isLinked": is_linked,
+            "linkedAccount": linked_acc,
+            "referralsCount": row["referrals_count"] or 0,
+            "stats": {"totalUsers": total_users, "vipUsers": vip_users}
+        })
 
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
