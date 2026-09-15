@@ -3,6 +3,7 @@ import sys
 import time
 import logging
 import sqlite3
+import json
 from datetime import datetime, timedelta
 from threading import Thread
 
@@ -185,7 +186,7 @@ if bot:
             )
             bot.reply_to(
                 msg,
-                "🔒 **ACCÈS RESTREINT**\n\nVous devez obligatoirement rejoindre notre canal officiel pour continuer.",
+                "🔒 **ACCÈS RESTREINT**\n\nVous devez obligATOIREMENT rejoindre notre canal officiel pour continuer.",
                 reply_markup=markup,
             )
             return
@@ -280,7 +281,6 @@ if bot:
             user_exists = cursor.fetchone()
 
             if not user_exists:
-                # Créer l'utilisateur s'il n'est pas enregistré
                 cursor.execute(
                     "INSERT INTO users (user_id, username, status) VALUES (?, 'Inconnu', 'FREE')",
                     (target_id,)
@@ -553,6 +553,29 @@ if bot:
             start_parameter="vip-pay",
         )
 
+    # Interception du message envoyé par WebApp (tg.sendData)
+    @bot.message_handler(content_types=['web_app_data'])
+    def handle_web_app_data(msg):
+        try:
+            data = json.loads(msg.web_app_data.data)
+
+            if data.get("action") == "buy_vip":
+                stars_amount = data.get("stars", 500)
+                prices = [LabeledPrice(label="Pass VIP Terminal Trading (1 Mois)", amount=stars_amount)]
+
+                bot.send_invoice(
+                    msg.chat.id,
+                    title="Pass VIP Terminal Trading (1 Mois)",
+                    description="Déblocage complet des TP1, TP2, Stop Loss et signaux IA pour 30 jours.",
+                    invoice_payload="vip_stars_500",
+                    provider_token="", # Laisser vide pour Telegram Stars
+                    currency="XTR",     # Monnaie Telegram Stars
+                    prices=prices,
+                    start_parameter="vip-pay"
+                )
+        except Exception as e:
+            logger.error(f"Erreur réception WebApp Data : {e}")
+
     @bot.pre_checkout_query_handler(func=lambda query: True)
     def checkout(pre_checkout_query):
         bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
@@ -622,9 +645,7 @@ def publish_crypto_market_alert():
         logger.error(f"Erreur alerte crypto : {e}")
 
 scheduler = BackgroundScheduler(daemon=True)
-# Execution toutes les 3 heures
 scheduler.add_job(send_funnel_reminders, "interval", hours=3)
-# Alerte Crypto toutes les 4 heures dans le canal
 scheduler.add_job(publish_crypto_market_alert, "interval", hours=4)
 scheduler.start()
 
@@ -633,13 +654,11 @@ scheduler.start()
 # ---------------------------------------------------------
 app = Flask(__name__)
 
-# Route de Santé pour UptimeRobot et Render
 @app.route("/", methods=["GET"])
 @app.route("/health", methods=["GET"])
 def health_check():
     return jsonify({"status": "online", "message": "Bot Telegram & API Web Services Opérationnels"}), 200
 
-# Route de vérification et statistiques admin pour la Mini App Web
 @app.route("/api/user-status", methods=["POST"])
 def get_user_status():
     data = request.json or {}
@@ -657,7 +676,6 @@ def get_user_status():
         )
         row = cursor.fetchone()
 
-        # Récupération des stats administratives
         cursor.execute("SELECT COUNT(*) as total FROM users")
         total_users = cursor.fetchone()["total"]
 
@@ -675,7 +693,6 @@ def get_user_status():
                 }
             )
 
-        # Vérification d'expiration du VIP
         is_vip = False
         if row["status"] == "VIP":
             if row["vip_expiry"]:
@@ -709,7 +726,7 @@ def toggle_vip():
     data = request.json or {}
     admin_id = data.get("adminId")
     target_id = data.get("targetId")
-    action = data.get("action")  # "grant" ou "revoke"
+    action = data.get("action")
 
     if int(admin_id) != ADMIN_ID:
         return jsonify({"error": "Accès non autorisé"}), 403
