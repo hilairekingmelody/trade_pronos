@@ -196,6 +196,123 @@ if bot:
 
         send_trading_funnel(msg.chat.id)
 
+    # ---------------------------------------------------------
+    # COMMAND /ADMIN POUR LE PANNEAU DE CONTRÔLE
+    # ---------------------------------------------------------
+    @bot.message_handler(commands=["admin"])
+    def admin_cmd(msg):
+        user_id = msg.from_user.id
+        if user_id != ADMIN_ID:
+            bot.reply_to(msg, "❌ **Accès refusé.** Cette commande est réservée à l'administrateur.")
+            return
+
+        send_admin_dashboard(msg.chat.id)
+
+    def send_admin_dashboard(chat_id):
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) as total FROM users")
+            total_users = cursor.fetchone()["total"]
+
+            cursor.execute("SELECT COUNT(*) as vip FROM users WHERE status = 'VIP'")
+            vip_users = cursor.fetchone()["vip"]
+
+        text = (
+            "🛠️ **PANNEAU D'ADMINISTRATION**\n\n"
+            f"👥 **Utilisateurs Totaux :** `{total_users}`\n"
+            f"👑 **Membres VIP Actifs :** `{vip_users}`\n\n"
+            "Sélectionnez une action ci-dessous :"
+        )
+
+        markup = InlineKeyboardMarkup()
+        markup.add(
+            InlineKeyboardButton("➕ Donner VIP Manuellement", callback_data="adm_grant_manual"),
+            InlineKeyboardButton("➖ Retirer VIP Manuellement", callback_data="adm_revoke_manual")
+        )
+        markup.add(InlineKeyboardButton("🔄 Rafraîchir les Stats", callback_data="adm_refresh_stats"))
+
+        bot.send_message(chat_id, text, reply_markup=markup)
+
+    @bot.callback_query_handler(func=lambda call: call.data == "adm_refresh_stats")
+    def admin_refresh(call):
+        if call.from_user.id != ADMIN_ID:
+            return
+        bot.answer_callback_query(call.id, "Mise à jour des stats...")
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+        send_admin_dashboard(call.message.chat.id)
+
+    @bot.callback_query_handler(func=lambda call: call.data in ["adm_grant_manual", "adm_revoke_manual"])
+    def admin_manual_action(call):
+        if call.from_user.id != ADMIN_ID:
+            return
+
+        action = call.data
+        user_states[call.message.chat.id] = action
+        bot.answer_callback_query(call.id)
+
+        prompt_text = (
+            "✏️ Entrez l'**ID Telegram** de l'utilisateur à passer en VIP (30 jours) :"
+            if action == "adm_grant_manual"
+            else "✏️ Entrez l'**ID Telegram** de l'utilisateur auquel retirer le VIP :"
+        )
+        bot.send_message(call.message.chat.id, prompt_text)
+
+    @bot.message_handler(func=lambda msg: user_states.get(msg.chat.id) in ["adm_grant_manual", "adm_revoke_manual"])
+    def process_admin_input(msg):
+        if msg.from_user.id != ADMIN_ID:
+            return
+
+        action = user_states.get(msg.chat.id)
+        target_id_str = msg.text.strip()
+
+        if not target_id_str.isdigit():
+            bot.reply_to(msg, "❌ ID invalide. Veuillez entrer un nombre entier.")
+            user_states[msg.chat.id] = None
+            return
+
+        target_id = int(target_id_str)
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (target_id,))
+            user_exists = cursor.fetchone()
+
+            if not user_exists:
+                # Créer l'utilisateur s'il n'est pas enregistré
+                cursor.execute(
+                    "INSERT INTO users (user_id, username, status) VALUES (?, 'Inconnu', 'FREE')",
+                    (target_id,)
+                )
+
+            if action == "adm_grant_manual":
+                expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+                cursor.execute(
+                    "UPDATE users SET status = 'VIP', vip_expiry = ? WHERE user_id = ?",
+                    (expiry, target_id)
+                )
+                conn.commit()
+                bot.reply_to(msg, f"✅ Accès VIP (30 jours) accordé avec succès à `{target_id}`.")
+                try:
+                    bot.send_message(target_id, "🎉 Un administrateur vous a attribué **1 mois d'accès VIP gratuit** !")
+                except Exception:
+                    pass
+
+            elif action == "adm_revoke_manual":
+                cursor.execute(
+                    "UPDATE users SET status = 'FREE', vip_expiry = NULL WHERE user_id = ?",
+                    (target_id,)
+                )
+                conn.commit()
+                bot.reply_to(msg, f"🔴 Accès VIP retiré avec succès pour `{target_id}`.")
+                try:
+                    bot.send_message(target_id, "ℹ️ Votre accès VIP a été révoqué par un administrateur.")
+                except Exception:
+                    pass
+
+        user_states[msg.chat.id] = None
+
     @bot.callback_query_handler(func=lambda call: call.data == "check_join")
     def callback_check_join(call):
         if check_channel_membership(call.from_user.id):
@@ -228,7 +345,7 @@ if bot:
         )
         markup.add(
             InlineKeyboardButton(
-                "⭐ Obtenir le Pass via Telegram Stars", callback_data="pay_stars_500"
+                "⭐ Pass VIP (1 Mois) - 500 Stars", callback_data="pay_stars_500"
             )
         )
         bot.send_message(
@@ -416,20 +533,20 @@ if bot:
         )
 
     # ---------------------------------------------------------
-    # 6. PAIEMENT TELEGRAM STARS
+    # 6. PAIEMENT TELEGRAM STARS (1 MOIS = 500 STARS)
     # ---------------------------------------------------------
     @bot.callback_query_handler(func=lambda call: call.data.startswith("pay_stars_"))
     def process_stars_payment(call):
         stars_amount = int(call.data.replace("pay_stars_", ""))
         bot.answer_callback_query(call.id)
 
-        prices = [LabeledPrice(label="Pass VIP Terminal Trading", amount=stars_amount)]
+        prices = [LabeledPrice(label="Pass VIP Terminal Trading (1 Mois)", amount=stars_amount)]
 
         bot.send_invoice(
             call.message.chat.id,
-            title="Pass VIP Terminal Trading",
-            description="Déblocage de tous les TP, SL et fonctionnalités IA.",
-            invoice_payload=f"vip_stars_{stars_amount}",
+            title="Pass VIP Terminal Trading (1 Mois)",
+            description="Déblocage complet des TP1, TP2, Stop Loss et signaux IA pour 30 jours.",
+            invoice_payload="vip_stars_500",
             provider_token="",
             currency="XTR",
             prices=prices,
@@ -443,15 +560,7 @@ if bot:
     @bot.message_handler(content_types=["successful_payment"])
     def got_payment(msg):
         user_id = msg.from_user.id
-        payload = msg.successful_payment.invoice_payload
-
-        days = 30
-        if "1200" in payload:
-            days = 90
-        elif "3500" in payload:
-            days = 365
-
-        expiry = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
 
         with get_db_connection() as conn:
             cursor = conn.cursor()
@@ -464,7 +573,7 @@ if bot:
         send_app_access(msg.chat.id, congrats=True)
 
 # ---------------------------------------------------------
-# 7. AUTOMATISATIONS & RELANCES
+# 7. AUTOMATISATIONS & RELANCES (TOUTES LES 3H)
 # ---------------------------------------------------------
 def send_funnel_reminders():
     if not bot:
@@ -478,7 +587,10 @@ def send_funnel_reminders():
 
         for row in rows:
             user_id = row["user_id"]
-            msg = "⏳ **Rappel Trading :** Complétez votre inscription Exness/KuCoin ou débloquez l'accès via Telegram Stars pour utiliser le Terminal IA !"
+            msg = (
+                "⏳ **Rappel Trading :**\n\n"
+                "Ne manquez pas les meilleures opportunités du marché ! Complétez votre inscription Exness/KuCoin ou débloquez directement votre Pass VIP pour 500 Stars."
+            )
             try:
                 bot.send_message(user_id, msg)
                 time.sleep(0.05)
@@ -500,18 +612,20 @@ def publish_crypto_market_alert():
         e_i = "🟢" if eth_c >= 0 else "🔴"
 
         msg = (
-            "📊 **ANALYSE DU MARCHÉ CRYPTO**\n\n"
+            "📊 **ANALYSE DU MARCHÉ CRYPTO EN TEMPS RÉEL**\n\n"
             f"🪙 **BTC/USD :** `{btc_p} $` ({b_i} {btc_c:.2f}%)\n"
             f"🔹 **ETH/USD :** `{eth_p} $` ({e_i} {eth_c:.2f}%)\n\n"
-            "🔥 *Détectez les opportunités d'achat/vente sur la Mini App !"
+            "🔥 *Détectez les opportunités d'achat et de vente instantanément sur notre Mini App !"
         )
         bot.send_message(CHANNEL_ID, msg)
     except Exception as e:
         logger.error(f"Erreur alerte crypto : {e}")
 
 scheduler = BackgroundScheduler(daemon=True)
-scheduler.add_job(send_funnel_reminders, "cron", hour="6,12,18")
-scheduler.add_job(publish_crypto_market_alert, "interval", hours=6)
+# Execution toutes les 3 heures
+scheduler.add_job(send_funnel_reminders, "interval", hours=3)
+# Alerte Crypto toutes les 4 heures dans le canal
+scheduler.add_job(publish_crypto_market_alert, "interval", hours=4)
 scheduler.start()
 
 # ---------------------------------------------------------
@@ -525,7 +639,7 @@ app = Flask(__name__)
 def health_check():
     return jsonify({"status": "online", "message": "Bot Telegram & API Web Services Opérationnels"}), 200
 
-# Route de verification pour la Mini App Web
+# Route de vérification et statistiques admin pour la Mini App Web
 @app.route("/api/user-status", methods=["POST"])
 def get_user_status():
     data = request.json or {}
@@ -533,33 +647,89 @@ def get_user_status():
     if not user_id:
         return jsonify({"error": "userId manquant"}), 400
 
+    user_id_int = int(user_id)
+    now = datetime.now()
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT status, vip_expiry FROM users WHERE user_id = ?", (user_id,)
+            "SELECT status, vip_expiry, referrals_count FROM users WHERE user_id = ?", (user_id_int,)
         )
         row = cursor.fetchone()
+
+        # Récupération des stats administratives
+        cursor.execute("SELECT COUNT(*) as total FROM users")
+        total_users = cursor.fetchone()["total"]
+
+        cursor.execute("SELECT COUNT(*) as vip FROM users WHERE status = 'VIP'")
+        vip_users = cursor.fetchone()["vip"]
 
         if not row:
             return jsonify(
                 {
                     "status": "UNREGISTERED",
-                    "isVip": False,
-                    "isAdmin": (int(user_id) == ADMIN_ID),
+                    "isVip": (user_id_int == ADMIN_ID),
+                    "isAdmin": (user_id_int == ADMIN_ID),
+                    "referralsCount": 0,
+                    "stats": {"totalUsers": total_users, "vipUsers": vip_users}
                 }
             )
 
-        is_vip = row["status"] == "VIP" or int(user_id) == ADMIN_ID
+        # Vérification d'expiration du VIP
+        is_vip = False
+        if row["status"] == "VIP":
+            if row["vip_expiry"]:
+                try:
+                    exp_date = datetime.strptime(row["vip_expiry"], "%Y-%m-%d %H:%M:%S")
+                    if exp_date > now:
+                        is_vip = True
+                    else:
+                        cursor.execute("UPDATE users SET status = 'FREE' WHERE user_id = ?", (user_id_int,))
+                        conn.commit()
+                except Exception:
+                    is_vip = True
+            else:
+                is_vip = True
+
+        if user_id_int == ADMIN_ID:
+            is_vip = True
+
         return jsonify(
             {
-                "status": row["status"],
+                "status": "VIP" if is_vip else "FREE",
                 "isVip": is_vip,
-                "isAdmin": (int(user_id) == ADMIN_ID),
+                "isAdmin": (user_id_int == ADMIN_ID),
+                "referralsCount": row["referrals_count"] or 0,
+                "stats": {"totalUsers": total_users, "vipUsers": vip_users}
             }
         )
 
+@app.route("/api/admin/toggle-vip", methods=["POST"])
+def toggle_vip():
+    data = request.json or {}
+    admin_id = data.get("adminId")
+    target_id = data.get("targetId")
+    action = data.get("action")  # "grant" ou "revoke"
+
+    if int(admin_id) != ADMIN_ID:
+        return jsonify({"error": "Accès non autorisé"}), 403
+
+    if not target_id:
+        return jsonify({"error": "ID cible manquant"}), 400
+
+    target_id_int = int(target_id)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if action == "grant":
+            expiry = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute("UPDATE users SET status = 'VIP', vip_expiry = ? WHERE user_id = ?", (expiry, target_id_int))
+        else:
+            cursor.execute("UPDATE users SET status = 'FREE', vip_expiry = NULL WHERE user_id = ?", (target_id_int,))
+        conn.commit()
+
+    return jsonify({"success": True, "message": "Statut mis à jour !"})
+
 def run_flask():
-    # Ecoute globale 0.0.0.0 et port dynamic Render
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
 
