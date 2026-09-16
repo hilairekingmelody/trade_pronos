@@ -2,6 +2,7 @@ import os
 import sys
 import logging
 import sqlite3
+import time
 from datetime import datetime, timedelta
 from threading import Thread
 
@@ -70,7 +71,6 @@ def init_db():
 init_db()
 
 def update_user_activity(user_id: int, step: str = None):
-    """Met à jour l'activité et l'étape de l'utilisateur dans le tunnel d'achat."""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with get_db() as conn:
         c = conn.cursor()
@@ -323,7 +323,6 @@ if bot:
                     pass
 
 def run_reminders_3h():
-    """Tâche périodique pour envoyer un rappel aux utilisateurs ayant abandonné le processus."""
     if not bot: return
     limit_time = (datetime.now() - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
     with get_db() as conn:
@@ -371,9 +370,19 @@ def run_market_alerts():
     except Exception as e:
         logger.error(f"Erreur alerte marché : {e}")
 
+# TÂCHE AUTO-PING ANTI-SOMMEIL RENDER
+def keep_alive_ping():
+    try:
+        if URL_MINI_APP:
+            requests.get(f"{URL_MINI_APP.rstrip('/')}/health", timeout=5)
+            logger.info("Keep-alive ping envoyé avec succès.")
+    except Exception as e:
+        logger.error(f"Erreur Keep-alive ping : {e}")
+
 sched = BackgroundScheduler(daemon=True)
 sched.add_job(run_reminders_3h, 'interval', minutes=15)
 sched.add_job(run_market_alerts, 'interval', hours=1)
+sched.add_job(keep_alive_ping, 'interval', minutes=10) # Auto-ping Render
 sched.start()
 
 app = Flask(__name__)
@@ -381,6 +390,7 @@ CORS(app)
 
 @app.route("/", methods=["GET"])
 @app.route("/health", methods=["GET"])
+@app.route("/ping", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "service": "Trading Bot Web Service"}), 200
 
