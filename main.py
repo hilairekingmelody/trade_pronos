@@ -187,14 +187,14 @@ if bot:
                 "✅ **Votre compte est vérifié.** Vous pouvez accéder gratuitement à tous les signaux et fonctionnalités de la Mini App ci-dessous :"
             )
         else:
-            markup.add(InlineKeyboardButton("📊 Inscription Exness (Promo: 395vyusacl)", url=EXNESS_LINK))
-            markup.add(InlineKeyboardButton("📊 Inscription KuCoin (Promo: rEN8V1E)", url=KUCOIN_LINK))
-            markup.add(InlineKeyboardButton("📥 Envoyer Preuves de Dépôt (10$ min)", callback_data="submit_proof"))
+            markup.add(InlineKeyboardButton("📊 Inscription Exness (Code Promo: 395vyusacl)", url=EXNESS_LINK))
+            markup.add(InlineKeyboardButton("📊 Inscription KuCoin (Code Promo: rEN8V1E)", url=KUCOIN_LINK))
+            markup.add(InlineKeyboardButton("📥 Preuves d'inscription (ID + Capture d'écran)", callback_data="submit_proof"))
 
             text = (
-                f"Bienvenue *{u_name}* sur le Terminal de Trading.\n\n"
-                "🔹 **Accès à la Mini App :** Pour débloquer l'accès complet et gratuit aux signaux IA, vous devez effectuer un dépôt minimum de **10$** sur Exness ou KuCoin via nos liens partenaires et soumettre votre preuve.\n\n"
-                "⚠️ *Votre compte sera validé par un administrateur après la vérification de vos preuves.*"
+                f"Bienvenue *{u_name}* sur l'IA des Signaux Trading Crypto & Forex gratuits.\n\n"
+                "🔹 **Accès à la Mini App :** Pour débloquer votre accès complet et gratuit aux signaux IA, Veuillez vous inscrire sur KuCoin ou Exness via nos liens ci-dessous, Effectuez un dépôt minimum de **10$** et Soumettez vos preuves d'inscription ici pour la validation.\n\n"
+                "⚠️ *Votre compte sera validé et votre accès débloqué par un administrateur après la vérification de vos preuves.*"
             )
 
         bot.send_message(chat_id, text, reply_markup=markup)
