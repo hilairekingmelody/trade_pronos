@@ -117,7 +117,6 @@ def fetch_real_price(symbol_key):
         except Exception:
             pass
 
-    # Prix par défaut de sécurité en cas de panne API
     fallback_prices = {"BTCUSDT": 76192.35, "ETHUSDT": 2650.40, "SOLUSDT": 188.50, "EURUSD": 1.0852, "GBPUSD": 1.2940, "USDJPY": 153.20}
     return fallback_prices.get(symbol_key, 100.0)
 
@@ -362,8 +361,37 @@ def run_reminders_3h():
                 pass
         conn.commit()
 
+# --- NOUVELLE FONCTION : ENVOI D'ALERTES DE PRIX DANS LE CANAL ---
+def send_market_alerts():
+    if not bot or not CHANNEL_ID:
+        return
+
+    pairs = ["BTCUSDT", "ETHUSDT", "EURUSD"]
+    selected = random.choice(pairs)
+    config = PAIRS_CONFIG[selected]
+    price = fetch_real_price(selected)
+    direction = "BULLISH 🚀" if random.random() > 0.5 else "BEARISH 📉"
+
+    msg = (
+        f"🚨 **ALERTE MARCHÉ EN TEMPS RÉEL**\n\n"
+        f"📊 **Actif :** `{selected}`\n"
+        f"💰 **Prix actuel :** `{price} {config['unit']}`\n"
+        f"📈 **Tendance détectée :** {direction}\n\n"
+        f"👉 _Consultez la Mini App pour obtenir le signal d'entrée exact avec TP et SL._"
+    )
+
+    try:
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("📈 Analyser dans la Mini App", url=f"https://t.me/{CHANNEL_ID.replace('@', '')}"))
+        bot.send_message(CHANNEL_ID, msg, reply_markup=markup)
+        logger.info(f"Alerte marché envoyée dans {CHANNEL_ID}")
+    except Exception as e:
+        logger.error(f"Erreur lors de l'envoi de l'alerte marché : {e}")
+
 sched = BackgroundScheduler(daemon=True)
 sched.add_job(run_reminders_3h, 'interval', minutes=15)
+# Envoie une alerte automatique dans le canal toutes les 30 minutes
+sched.add_job(send_market_alerts, 'interval', minutes=30)
 sched.start()
 
 app = Flask(__name__)
@@ -387,11 +415,9 @@ def api_generate_signal():
     decimals = config["decimals"]
     unit = config["unit"]
 
-    # Direction IA basée sur des probabilités pondérées
     direction = "BUY" if random.random() > 0.45 else "SELL"
     probability = random.randint(82, 96)
 
-    # Multiplicateurs de scalping / swing selon le timeframe
     tf_multipliers = {"1": 0.002, "5": 0.005, "15": 0.009, "60": 0.018}
     mult = tf_multipliers.get(tf, 0.009)
 
