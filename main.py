@@ -69,6 +69,17 @@ def init_db():
 
 init_db()
 
+def update_user_activity(user_id: int, step: str = None):
+    """Met à jour l'activité et l'étape de l'utilisateur dans le tunnel d'achat."""
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with get_db() as conn:
+        c = conn.cursor()
+        if step:
+            c.execute("UPDATE users SET last_active = ?, funnel_step = ? WHERE user_id = ?", (now_str, step, user_id))
+        else:
+            c.execute("UPDATE users SET last_active = ? WHERE user_id = ?", (now_str, user_id))
+        conn.commit()
+
 def check_channel_membership(user_id: int) -> bool:
     if not CHANNEL_ID or not bot or user_id == ADMIN_ID:
         return True
@@ -199,7 +210,7 @@ if bot:
         try:
             target_id = int(msg.text.split()[1])
             with get_db() as conn:
-                conn.cursor().execute("UPDATE users SET status = 'VERIFIED', linked_account = 'MANUAL' WHERE user_id = ?", (target_id,))
+                conn.cursor().execute("UPDATE users SET status = 'VERIFIED', linked_account = 'MANUAL', funnel_step = 'COMPLETED' WHERE user_id = ?", (target_id,))
                 conn.commit()
             bot.reply_to(msg, f"✅ L'utilisateur `{target_id}` a été validé. Accès Mini App débloqué.")
 
@@ -220,7 +231,7 @@ if bot:
         try:
             target_id = int(msg.text.split()[1])
             with get_db() as conn:
-                conn.cursor().execute("UPDATE users SET status = 'PENDING', linked_account = NULL WHERE user_id = ?", (target_id,))
+                conn.cursor().execute("UPDATE users SET status = 'PENDING', linked_account = NULL, funnel_step = 'STARTED' WHERE user_id = ?", (target_id,))
                 conn.commit()
             bot.reply_to(msg, f"🚫 Accès révoqué pour l'utilisateur `{target_id}`.")
             try:
@@ -232,14 +243,18 @@ if bot:
 
     @bot.callback_query_handler(func=lambda c: c.data == "submit_proof")
     def submit_proof_start(call):
-        user_states[call.message.chat.id] = "WAIT_ID"
+        u_id = call.message.chat.id
+        user_states[u_id] = "WAIT_ID"
+        update_user_activity(u_id, "WAIT_ID")
         bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, "📝 **Étape 1/2 :** Entrez votre ID de compte Exness ou KuCoin :")
+        bot.send_message(u_id, "📝 **Étape 1/2 :** Entrez votre ID de compte Exness ou KuCoin :")
 
     @bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "WAIT_ID")
     def process_proof_id(msg):
-        user_temp_data[msg.chat.id] = {"account_id": msg.text.strip()}
-        user_states[msg.chat.id] = "WAIT_PHOTO"
+        u_id = msg.chat.id
+        user_temp_data[u_id] = {"account_id": msg.text.strip()}
+        user_states[u_id] = "WAIT_PHOTO"
+        update_user_activity(u_id, "WAIT_PHOTO")
         bot.reply_to(msg, "📸 **Étape 2/2 :** Envoyez la capture d'écran de votre dépôt de 10$ minimum.")
 
     @bot.message_handler(content_types=["photo"], func=lambda m: user_states.get(m.chat.id) == "WAIT_PHOTO")
@@ -254,7 +269,7 @@ if bot:
             c.execute("INSERT INTO pending_validations (user_id, account_id, photo_id, created_at) VALUES (?, ?, ?, ?)",
                       (u_id, acc_id, photo_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
             req_id = c.lastrowid
-            c.execute("UPDATE users SET funnel_step = 'PROOFS_SENT' WHERE user_id = ?", (u_id,))
+            c.execute("UPDATE users SET funnel_step = 'PROOFS_SENT', last_active = ? WHERE user_id = ?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), u_id))
             conn.commit()
 
         user_states[chat_id] = None
@@ -304,6 +319,7 @@ if bot:
             if row:
                 u_id = int(row["user_id"])
                 c.execute("UPDATE pending_validations SET status = 'REJECTED' WHERE id = ?", (req_id,))
+                c.execute("UPDATE users SET funnel_step = 'STARTED' WHERE user_id = ?", (u_id,))
                 conn.commit()
                 bot.edit_message_caption(caption="❌ **Demande Rejetée.**", chat_id=call.message.chat.id, message_id=call.message.message_id)
                 try:
@@ -312,11 +328,18 @@ if bot:
                     pass
 
 def run_reminders_3h():
+    """Tâche périodique pour envoyer un rappel aux utilisateurs ayant abandonné le processus."""
     if not bot: return
     limit_time = (datetime.now() - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
     with get_db() as conn:
         c = conn.cursor()
-        c.execute("SELECT user_id FROM users WHERE status = 'PENDING' AND funnel_step IN ('STARTED', 'WAIT_ID', 'WAIT_PHOTO') AND last_active <= ? AND last_reminder_sent IS NULL", (limit_time,))
+        c.execute("""
+            SELECT user_id FROM users 
+            WHERE status = 'PENDING' 
+              AND funnel_step IN ('STARTED', 'WAIT_ID', 'WAIT_PHOTO') 
+              AND last_active <= ? 
+              AND last_reminder_sent IS NULL
+        """, (limit_time,))
         users = c.fetchall()
         for u in users:
             try:
@@ -379,7 +402,6 @@ def user_status():
 
     with get_db() as conn:
         c = conn.cursor()
-        # Cast explicite pour la comparaison
         c.execute("SELECT status, linked_account, referrals_count FROM users WHERE user_id = ?", (u_id,))
         row = c.fetchone()
 
@@ -431,7 +453,7 @@ def admin_toggle_vip():
     with get_db() as conn:
         c = conn.cursor()
         if action == "grant":
-            c.execute("UPDATE users SET status = 'VERIFIED', linked_account = 'MANUAL' WHERE user_id = ?", (target_id,))
+            c.execute("UPDATE users SET status = 'VERIFIED', linked_account = 'MANUAL', funnel_step = 'COMPLETED' WHERE user_id = ?", (target_id,))
             conn.commit()
             if bot:
                 try:
@@ -440,7 +462,7 @@ def admin_toggle_vip():
                     pass
             return jsonify({"success": True, "message": f"Accès accordé à {target_id}."})
         elif action == "revoke":
-            c.execute("UPDATE users SET status = 'PENDING', linked_account = NULL WHERE user_id = ?", (target_id,))
+            c.execute("UPDATE users SET status = 'PENDING', linked_account = NULL, funnel_step = 'STARTED' WHERE user_id = ?", (target_id,))
             conn.commit()
             if bot:
                 try:
