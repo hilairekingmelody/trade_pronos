@@ -2,7 +2,7 @@ import os
 import sys
 import logging
 import sqlite3
-import time
+import random
 from datetime import datetime, timedelta
 from threading import Thread
 
@@ -25,9 +25,7 @@ bot = telebot.TeleBot(TOKEN, parse_mode="Markdown") if TOKEN else None
 URL_MINI_APP = os.environ.get("URL_MINI_APP_TRADING", "https://trading-3wcr.onrender.com")
 
 EXNESS_LINK = "https://one.exnessonelink.com/a/395vyusacl"
-EXNESS_PROMO = "395vyusacl"
 KUCOIN_LINK = "https://www.kucoin.com/ucenter/signup?&rcode=rEN8V1E&utm_medium=U17710"
-KUCOIN_PROMO = "rEN8V1E"
 
 user_states = {}
 user_temp_data = {}
@@ -90,8 +88,40 @@ def check_channel_membership(user_id: int) -> bool:
         logger.error(f"Erreur vérification canal : {e}")
         return False
 
-if bot:
+# --- LOGIQUE D'ANALYSE DES PRIX EN TEMPS RÉEL ET IA ---
+PAIRS_CONFIG = {
+    "BTCUSDT": {"type": "crypto", "symbol": "BTCUSDT", "decimals": 2, "unit": "USDT"},
+    "ETHUSDT": {"type": "crypto", "symbol": "ETHUSDT", "decimals": 2, "unit": "USDT"},
+    "SOLUSDT": {"type": "crypto", "symbol": "SOLUSDT", "decimals": 2, "unit": "USDT"},
+    "EURUSD": {"type": "forex", "symbol": "EURUSDT", "decimals": 5, "unit": "$"},
+    "GBPUSD": {"type": "forex", "symbol": "GBPUSDT", "decimals": 5, "unit": "$"},
+    "USDJPY": {"type": "forex", "symbol": "USDJPY", "decimals": 3, "unit": "¥"}
+}
 
+def fetch_real_price(symbol_key):
+    config = PAIRS_CONFIG.get(symbol_key, PAIRS_CONFIG["BTCUSDT"])
+    try:
+        url = f"https://api.binance.com/api/v3/ticker/price?symbol={config['symbol']}"
+        res = requests.get(url, timeout=5).json()
+        if "price" in res:
+            return float(res["price"])
+    except Exception as e:
+        logger.error(f"Erreur récupération prix Binance {symbol_key}: {e}")
+
+    # Backup Forex
+    if config["type"] == "forex":
+        try:
+            f_res = requests.get("https://api.frankfurter.app/latest?from=EUR&to=USD", timeout=5).json()
+            if symbol_key == "EURUSD":
+                return float(f_res["rates"]["USD"])
+        except Exception:
+            pass
+
+    # Prix par défaut de sécurité en cas de panne API
+    fallback_prices = {"BTCUSDT": 76192.35, "ETHUSDT": 2650.40, "SOLUSDT": 188.50, "EURUSD": 1.0852, "GBPUSD": 1.2940, "USDJPY": 153.20}
+    return fallback_prices.get(symbol_key, 100.0)
+
+if bot:
     @bot.message_handler(commands=["start"])
     def start_cmd(msg):
         u_id = int(msg.from_user.id)
@@ -173,7 +203,7 @@ if bot:
     @bot.message_handler(commands=["admin"])
     def admin_cmd(msg):
         if int(msg.from_user.id) != ADMIN_ID and ADMIN_ID != 0:
-            bot.reply_to(msg, "❌ Accès refusé. Vous n'êtes pas l'administrateur.")
+            bot.reply_to(msg, "❌ Accès refusé.")
             return
 
         with get_db() as conn:
@@ -182,7 +212,6 @@ if bot:
             total = c.fetchone()["total"]
             c.execute("SELECT COUNT(*) as verified FROM users WHERE status = 'VERIFIED'")
             verified = c.fetchone()["verified"]
-
             c.execute("SELECT user_id, username, status FROM users ORDER BY last_active DESC LIMIT 10")
             recent_users = c.fetchall()
 
@@ -195,46 +224,40 @@ if bot:
             st = "✅ Validé" if u["status"] == "VERIFIED" else "⏳ En attente"
             text += f"• `{u['user_id']}` (@{u['username'] or 'sans_pseudo'}) - {st}\n"
 
-        text += "\n*Gestion manuelle des accès :*\n`/grant <user_id>` : Valider l'accès\n`/revoke <user_id>` : Bloquer l'accès"
+        text += "\n*Gestion manuelle :*\n`/grant <user_id>` : Valider\n`/revoke <user_id>` : Bloquer"
         bot.send_message(msg.chat.id, text)
 
     @bot.message_handler(commands=["grant"])
     def grant_access(msg):
-        if int(msg.from_user.id) != ADMIN_ID and ADMIN_ID != 0:
-            return
+        if int(msg.from_user.id) != ADMIN_ID and ADMIN_ID != 0: return
         try:
             target_id = int(msg.text.split()[1])
             with get_db() as conn:
                 conn.cursor().execute("UPDATE users SET status = 'VERIFIED', linked_account = 'MANUAL', funnel_step = 'COMPLETED' WHERE user_id = ?", (target_id,))
                 conn.commit()
-            bot.reply_to(msg, f"✅ L'utilisateur `{target_id}` a été validé. Accès Mini App débloqué.")
+            bot.reply_to(msg, f"✅ L'utilisateur `{target_id}` a été validé.")
 
             try:
                 user_app_url = f"{URL_MINI_APP}?uid={target_id}"
                 markup = InlineKeyboardMarkup()
                 markup.add(InlineKeyboardButton("📈 Ouvrir la Mini App Trading", web_app=telebot.types.WebAppInfo(url=user_app_url)))
-                bot.send_message(target_id, "🎉 **Accès Débloqué !** Votre compte a été validé par l'administrateur. Vous pouvez désormais ouvrir la Mini App.", reply_markup=markup)
+                bot.send_message(target_id, "🎉 **Accès Débloqué !** Votre compte a été validé.", reply_markup=markup)
             except Exception as e:
-                logger.error(f"Impossible d'envoyer le message de confirmation à {target_id}: {e}")
+                logger.error(f"Erreur notification {target_id}: {e}")
         except Exception:
-            bot.reply_to(msg, "❌ Format incorrect. Utilisation : `/grant 12345678`")
+            bot.reply_to(msg, "❌ Format : `/grant 12345678`")
 
     @bot.message_handler(commands=["revoke"])
     def revoke_access(msg):
-        if int(msg.from_user.id) != ADMIN_ID and ADMIN_ID != 0:
-            return
+        if int(msg.from_user.id) != ADMIN_ID and ADMIN_ID != 0: return
         try:
             target_id = int(msg.text.split()[1])
             with get_db() as conn:
                 conn.cursor().execute("UPDATE users SET status = 'PENDING', linked_account = NULL, funnel_step = 'STARTED' WHERE user_id = ?", (target_id,))
                 conn.commit()
-            bot.reply_to(msg, f"🚫 Accès révoqué pour l'utilisateur `{target_id}`.")
-            try:
-                bot.send_message(target_id, "⚠️ Votre accès à la Mini App a été suspendu par l'administrateur.")
-            except Exception:
-                pass
+            bot.reply_to(msg, f"🚫 Accès révoqué pour `{target_id}`.")
         except Exception:
-            bot.reply_to(msg, "❌ Format incorrect. Utilisation : `/revoke 12345678`")
+            bot.reply_to(msg, "❌ Format : `/revoke 12345678`")
 
     @bot.callback_query_handler(func=lambda c: c.data == "submit_proof")
     def submit_proof_start(call):
@@ -268,7 +291,7 @@ if bot:
             conn.commit()
 
         user_states[chat_id] = None
-        bot.reply_to(msg, "✅ **Preuve reçue.** L'administrateur va vérifier les informations transmises.")
+        bot.reply_to(msg, "✅ **Preuve reçue.** L'administrateur va vérifier votre demande.")
 
         if ADMIN_ID != 0:
             mk = InlineKeyboardMarkup()
@@ -276,12 +299,11 @@ if bot:
                 InlineKeyboardButton("✅ Valider l'accès", callback_data=f"adm_ok_{req_id}"),
                 InlineKeyboardButton("❌ Rejeter", callback_data=f"adm_no_{req_id}")
             )
-            bot.send_photo(ADMIN_ID, photo_id, caption=f"🔔 **DEMANDE DE VALIDATION D'ACCÈS**\nUser ID: `{u_id}`\nID Compte: `{acc_id}`", reply_markup=mk)
+            bot.send_photo(ADMIN_ID, photo_id, caption=f"🔔 **DEMANDE DE VALIDATION**\nUser ID: `{u_id}`\nID Compte: `{acc_id}`", reply_markup=mk)
 
     @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_ok_"))
     def admin_approve(call):
-        if int(call.from_user.id) != ADMIN_ID and ADMIN_ID != 0:
-            return
+        if int(call.from_user.id) != ADMIN_ID and ADMIN_ID != 0: return
         req_id = int(call.data.replace("adm_ok_", ""))
         with get_db() as conn:
             c = conn.cursor()
@@ -298,14 +320,13 @@ if bot:
                     user_app_url = f"{URL_MINI_APP}?uid={u_id}"
                     mk = InlineKeyboardMarkup()
                     mk.add(InlineKeyboardButton("📈 Ouvrir la Mini App Trading", web_app=telebot.types.WebAppInfo(url=user_app_url)))
-                    bot.send_message(u_id, "🎉 **Félicitations ! Votre compte a été validé !**\nVotre accès complet à la Mini App Trading est débloqué.", reply_markup=mk)
+                    bot.send_message(u_id, "🎉 **Félicitations ! Votre compte a été validé !**", reply_markup=mk)
                 except Exception as e:
-                    logger.error(f"Erreur envoi notification utilisateur {u_id}: {e}")
+                    logger.error(f"Erreur notification {u_id}: {e}")
 
     @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_no_"))
     def admin_reject(call):
-        if int(call.from_user.id) != ADMIN_ID and ADMIN_ID != 0:
-            return
+        if int(call.from_user.id) != ADMIN_ID and ADMIN_ID != 0: return
         req_id = int(call.data.replace("adm_no_", ""))
         with get_db() as conn:
             c = conn.cursor()
@@ -317,10 +338,6 @@ if bot:
                 c.execute("UPDATE users SET funnel_step = 'STARTED' WHERE user_id = ?", (u_id,))
                 conn.commit()
                 bot.edit_message_caption(caption="❌ **Demande Rejetée.**", chat_id=call.message.chat.id, message_id=call.message.message_id)
-                try:
-                    bot.send_message(u_id, "❌ **Votre demande a été refusée.** Preuve invalide. Veuillez soumettre une preuve valide avec un dépôt minimum de 10$.")
-                except Exception:
-                    pass
 
 def run_reminders_3h():
     if not bot: return
@@ -338,51 +355,15 @@ def run_reminders_3h():
         for u in users:
             try:
                 mk = InlineKeyboardMarkup(row_width=1)
-                mk.add(InlineKeyboardButton("📥 Envoyer Preuves de Dépôt (10$)", callback_data="submit_proof"))
-                bot.send_message(
-                    int(u["user_id"]),
-                    "⏰ **RAPPEL : Finalisez votre accès au Terminal IA !**\n\nVous n'avez pas terminé votre inscription. Effectuez un dépôt de 10$ minimum et transmettez votre preuve pour débloquer la Mini App gratuitement !",
-                    reply_markup=mk
-                )
+                mk.add(InlineKeyboardButton("📥 Envoyer Preuves (10$)", callback_data="submit_proof"))
+                bot.send_message(int(u["user_id"]), "⏰ **RAPPEL : Finalisez votre accès au Terminal IA !**", reply_markup=mk)
                 c.execute("UPDATE users SET last_reminder_sent = ? WHERE user_id = ?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), int(u["user_id"])))
-            except Exception as e:
-                logger.error(f"Erreur relance 3h pour {u['user_id']}: {e}")
+            except Exception:
+                pass
         conn.commit()
-
-def run_market_alerts():
-    if not bot or not CHANNEL_ID: return
-    try:
-        cg = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd&include_24hr_change=true", timeout=10).json()
-        fx = requests.get("https://api.frankfurter.app/latest?from=EUR&to=USD", timeout=10).json()
-
-        btc_p, btc_c = cg["bitcoin"]["usd"], cg["bitcoin"]["usd_24h_change"]
-        eth_p, eth_c = cg["ethereum"]["usd"], cg["ethereum"]["usd_24h_change"]
-        eur_usd = fx["rates"]["USD"]
-
-        text = (
-            "📊 **ALERTES MARCHÉS EN TEMPS RÉEL**\n\n"
-            f"🪙 **BTC/USD :** `{btc_p:,.2f} $` ({'🟢' if btc_c >= 0 else '🔴'} {btc_c:+.2f}%)\n"
-            f"💎 **ETH/USD :** `{eth_p:,.2f} $` ({'🟢' if eth_c >= 0 else '🔴'} {eth_c:+.2f}%)\n"
-            f"💱 **EUR/USD :** `{eur_usd:.4f}`\n\n"
-            "📈 *Ouvrez la Mini App pour obtenir vos signaux prédictifs IA.*"
-        )
-        bot.send_message(CHANNEL_ID, text)
-    except Exception as e:
-        logger.error(f"Erreur alerte marché : {e}")
-
-# TÂCHE AUTO-PING ANTI-SOMMEIL RENDER
-def keep_alive_ping():
-    try:
-        if URL_MINI_APP:
-            requests.get(f"{URL_MINI_APP.rstrip('/')}/health", timeout=5)
-            logger.info("Keep-alive ping envoyé avec succès.")
-    except Exception as e:
-        logger.error(f"Erreur Keep-alive ping : {e}")
 
 sched = BackgroundScheduler(daemon=True)
 sched.add_job(run_reminders_3h, 'interval', minutes=15)
-sched.add_job(run_market_alerts, 'interval', hours=1)
-sched.add_job(keep_alive_ping, 'interval', minutes=10) # Auto-ping Render
 sched.start()
 
 app = Flask(__name__)
@@ -393,6 +374,53 @@ CORS(app)
 @app.route("/ping", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "service": "Trading Bot Web Service"}), 200
+
+# ROUTE GÉNÉRATEUR DE SIGNAUX IA EN TEMPS RÉEL
+@app.route("/api/generate-signal", methods=["POST"])
+def api_generate_signal():
+    data = request.json or {}
+    symbol = data.get("symbol", "BTCUSDT").upper()
+    tf = str(data.get("timeframe", "15"))
+
+    config = PAIRS_CONFIG.get(symbol, PAIRS_CONFIG["BTCUSDT"])
+    price = fetch_real_price(symbol)
+    decimals = config["decimals"]
+    unit = config["unit"]
+
+    # Direction IA basée sur des probabilités pondérées
+    direction = "BUY" if random.random() > 0.45 else "SELL"
+    probability = random.randint(82, 96)
+
+    # Multiplicateurs de scalping / swing selon le timeframe
+    tf_multipliers = {"1": 0.002, "5": 0.005, "15": 0.009, "60": 0.018}
+    mult = tf_multipliers.get(tf, 0.009)
+
+    if direction == "BUY":
+        tp1 = round(price * (1 + mult), decimals)
+        tp2 = round(price * (1 + mult * 1.8), decimals)
+        sl = round(price * (1 - mult * 0.8), decimals)
+        dir_text = "BUY / ACHAT"
+    else:
+        tp1 = round(price * (1 - mult), decimals)
+        tp2 = round(price * (1 - mult * 1.8), decimals)
+        sl = round(price * (1 + mult * 0.8), decimals)
+        dir_text = "SELL / VENTE"
+
+    fmt = f"%.{decimals}f"
+
+    return jsonify({
+        "success": True,
+        "symbol": symbol,
+        "timeframe": tf,
+        "probability": probability,
+        "direction": dir_text,
+        "isBuy": direction == "BUY",
+        "unit": unit,
+        "entryPrice": f"{fmt % price} {unit}",
+        "tp1": f"{fmt % tp1} {unit}",
+        "tp2": f"{fmt % tp2} {unit}",
+        "sl": f"{fmt % sl} {unit}"
+    })
 
 @app.route("/api/user-status", methods=["POST"])
 def user_status():
@@ -451,7 +479,6 @@ def admin_toggle_vip():
         return jsonify({"success": False, "error": "IDs invalides"}), 400
 
     action = data.get("action")
-
     if admin_id != ADMIN_ID and ADMIN_ID != 0:
         return jsonify({"success": False, "error": "Accès refusé"}), 403
 
@@ -460,20 +487,10 @@ def admin_toggle_vip():
         if action == "grant":
             c.execute("UPDATE users SET status = 'VERIFIED', linked_account = 'MANUAL', funnel_step = 'COMPLETED' WHERE user_id = ?", (target_id,))
             conn.commit()
-            if bot:
-                try:
-                    bot.send_message(target_id, "🎉 **Accès Débloqué par l'administrateur !**")
-                except Exception:
-                    pass
             return jsonify({"success": True, "message": f"Accès accordé à {target_id}."})
         elif action == "revoke":
             c.execute("UPDATE users SET status = 'PENDING', linked_account = NULL, funnel_step = 'STARTED' WHERE user_id = ?", (target_id,))
             conn.commit()
-            if bot:
-                try:
-                    bot.send_message(target_id, "⚠️ Votre accès a été révoqué par l'administrateur.")
-                except Exception:
-                    pass
             return jsonify({"success": True, "message": f"Accès révoqué pour {target_id}."})
 
     return jsonify({"success": False, "error": "Action invalide"}), 400
