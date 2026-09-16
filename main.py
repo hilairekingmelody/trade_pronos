@@ -158,7 +158,6 @@ if bot:
                 "✅ **Votre compte est vérifié.** Vous pouvez accéder gratuitement à tous les signaux et fonctionnalités de la Mini App ci-dessous :"
             )
         else:
-            markup.add(InlineKeyboardButton("🔒 Mini App Verrouillée (Vérification requise)", callback_data="locked_app"))
             markup.add(InlineKeyboardButton("📊 Inscription Exness (Promo: 395vyusacl)", url=EXNESS_LINK))
             markup.add(InlineKeyboardButton("📊 Inscription KuCoin (Promo: rEN8V1E)", url=KUCOIN_LINK))
             markup.add(InlineKeyboardButton("📥 Envoyer Preuves de Dépôt (10$ min)", callback_data="submit_proof"))
@@ -166,14 +165,10 @@ if bot:
             text = (
                 f"Bienvenue *{u_name}* sur le Terminal de Trading.\n\n"
                 "🔹 **Accès à la Mini App :** Pour débloquer l'accès complet et gratuit aux signaux IA, vous devez effectuer un dépôt minimum de **10$** sur Exness ou KuCoin via nos liens partenaires et soumettre votre preuve.\n\n"
-                "⚠️ *La Mini App reste inaccessible tant que votre compte n'a pas été validé par un administrateur.*"
+                "⚠️ *Votre compte sera validé par un administrateur après la vérification de vos preuves.*"
             )
 
         bot.send_message(chat_id, text, reply_markup=markup)
-
-    @bot.callback_query_handler(func=lambda c: c.data == "locked_app")
-    def callback_locked_app(call):
-        bot.answer_callback_query(call.id, "🔒 Accès refusé ! Envoyez d'abord vos preuves de dépôt pour que l'administrateur valide votre compte.", show_alert=True)
 
     @bot.message_handler(commands=["admin"])
     def admin_cmd(msg):
