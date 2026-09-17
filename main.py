@@ -150,7 +150,7 @@ if bot:
             clean_channel = CHANNEL_ID.replace("@", "")
             markup.add(InlineKeyboardButton("📢 Rejoindre le Canal Officiel", url=f"https://t.me/{clean_channel}"))
             markup.add(InlineKeyboardButton("✅ J'ai rejoint le canal", callback_data="check_join"))
-            bot.reply_to(msg, "🔒 **ACCÈS RESTREINT**\n\nVous devez obligatoirement rejoindre notre canal officiel pour utiliser le bot.", reply_markup=markup)
+            bot.reply_to(msg, "🔒 **ACCÈS RESTREINT**\n\nVeuillez rejoindre notre canal officiel pour utiliser le bot.", reply_markup=markup)
             return
 
         send_main_menu(msg.chat.id, u_name, u_id)
