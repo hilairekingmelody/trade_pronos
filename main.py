@@ -370,7 +370,7 @@ def send_market_alerts():
     selected = random.choice(pairs)
     config = PAIRS_CONFIG[selected]
     price = fetch_real_price(selected)
-    direction = "BULLISH 🚀" if random.random() > 0.5 else "BEARISH 📉"
+    direction = "HAUSSIER 🚀" if random.random() > 0.5 else "BAISSIER 📉"
 
     msg = (
         f"🚨 **ALERTE MARCHÉ EN TEMPS RÉEL**\n\n"
@@ -382,7 +382,7 @@ def send_market_alerts():
 
     try:
         markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("📈 Analyser dans la Mini App", url=f"https://t.me/{CHANNEL_ID.replace('@', '')}"))
+        markup.add(InlineKeyboardButton("📈 Analyser dans la Mini App", url="https://t.me/trading_pronos_bot"))
         bot.send_message(CHANNEL_ID, msg, reply_markup=markup)
         logger.info(f"Alerte marché envoyée dans {CHANNEL_ID}")
     except Exception as e:
