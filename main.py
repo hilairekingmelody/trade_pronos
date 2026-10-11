@@ -1,427 +1,264 @@
 import os
-import sys
+import json
+import hmac
+import hashlib
 import logging
-import sqlite3
 import random
-from datetime import datetime, timedelta
+from datetime import datetime
 from threading import Thread
+from urllib.parse import parse_qsl
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import requests
+import psycopg2
+import pandas as pd
+from ta.trend import EMAIndicator
+from ta.momentum import RSIIndicator
 import telebot
-from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
+from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from apscheduler.schedulers.background import BackgroundScheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("TradingBot")
 
 TOKEN = os.environ.get("BOT_TOKEN", "").strip() or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID", "@trading_pronos").strip()
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "").strip()  # sans le @, pour les liens dans les alertes
+CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID", "").strip()  # canal où publier les alertes marché (optionnel)
 ADMIN_ID_RAW = os.environ.get("ADMIN_ID", "0").strip()
 ADMIN_ID = int(ADMIN_ID_RAW) if ADMIN_ID_RAW.isdigit() else 0
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 
 bot = telebot.TeleBot(TOKEN, parse_mode="Markdown") if TOKEN else None
 URL_MINI_APP = os.environ.get("URL_MINI_APP_TRADING", "https://trading-3wcr.onrender.com")
 
+# Offres partenaires : un simple encart marketing, jamais une barrière d'accès.
 EXNESS_LINK = "https://one.exnessonelink.com/a/395vyusacl"
+EXNESS_PROMO = "395vyusacl"
 KUCOIN_LINK = "https://www.kucoin.com/ucenter/signup?&rcode=rEN8V1E&utm_medium=U17710"
+KUCOIN_PROMO = "rEN8V1E"
 
-user_states = {}
-user_temp_data = {}
+LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "logo.png")
 
-DB_FILE = "bot_database.db"
 
+# --- BASE DE DONNÉES POSTGRESQL (PERSISTANTE) ---
 def get_db():
-    conn = sqlite3.connect(DB_FILE, timeout=15.0)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return psycopg2.connect(DATABASE_URL)
+
 
 def init_db():
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                status TEXT DEFAULT 'PENDING',
-                funnel_step TEXT DEFAULT 'STARTED',
-                vip_expiry TEXT,
-                referrer_id INTEGER,
-                referrals_count INTEGER DEFAULT 0,
-                last_active TEXT,
-                linked_account TEXT DEFAULT NULL,
-                last_reminder_sent TEXT DEFAULT NULL
+    if not DATABASE_URL:
+        logger.error("❌ DATABASE_URL est manquant — la base de données ne sera pas disponible.")
+        return
+    conn = get_db()
+    cur = conn.cursor()
+    # Table préfixée "trading_" pour ne jamais entrer en collision avec les
+    # tables d'un autre projet (ex: Pronostics) si la même base est réutilisée.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS trading_users (
+            user_id BIGINT PRIMARY KEY,
+            username TEXT,
+            referrer_id BIGINT,
+            referrals_count INT DEFAULT 0,
+            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def add_user(user_id: int, username: str, referrer_id: int = None) -> bool:
+    """Enregistre l'utilisateur s'il n'existe pas déjà. Retourne True si c'est
+    une toute nouvelle inscription (pour ne compter un parrainage qu'une fois)."""
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM trading_users WHERE user_id = %s", (user_id,))
+    exists = cur.fetchone() is not None
+
+    if not exists:
+        cur.execute(
+            "INSERT INTO trading_users (user_id, username, referrer_id) VALUES (%s, %s, %s)",
+            (user_id, username, referrer_id)
+        )
+        if referrer_id:
+            cur.execute(
+                "UPDATE trading_users SET referrals_count = referrals_count + 1 WHERE user_id = %s",
+                (referrer_id,)
             )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS pending_validations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                account_id TEXT,
-                photo_id TEXT,
-                status TEXT DEFAULT 'PENDING',
-                created_at TEXT
-            )
-        """)
-        conn.commit()
+    else:
+        cur.execute("UPDATE trading_users SET last_active = CURRENT_TIMESTAMP WHERE user_id = %s", (user_id,))
 
-init_db()
+    conn.commit()
+    cur.close()
+    conn.close()
+    return not exists
 
-def update_user_activity(user_id: int, step: str = None):
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with get_db() as conn:
-        c = conn.cursor()
-        if step:
-            c.execute("UPDATE users SET last_active = ?, funnel_step = ? WHERE user_id = ?", (now_str, step, user_id))
-        else:
-            c.execute("UPDATE users SET last_active = ? WHERE user_id = ?", (now_str, user_id))
-        conn.commit()
 
-def check_channel_membership(user_id: int) -> bool:
-    if not CHANNEL_ID or not bot or user_id == ADMIN_ID:
-        return True
+def get_all_user_ids():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM trading_users")
+    ids = [r[0] for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return ids
+
+
+def get_all_users_detailed():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, username, referrals_count FROM trading_users ORDER BY joined_at DESC")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+def get_user_referrals(user_id: int) -> int:
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT referrals_count FROM trading_users WHERE user_id = %s", (user_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row[0] if row else 0
+
+
+# --- VÉRIFICATION DE SIGNATURE TELEGRAM (sécurité des endpoints admin) ---
+def verify_telegram_data(init_data: str):
+    """Vérifie la signature HMAC de Telegram et retourne l'utilisateur vérifié,
+    ou None si la signature est invalide. Ne jamais faire confiance à un ID
+    envoyé tel quel par le client pour une action sensible (ex: diffusion, admin)."""
+    if not init_data or not TOKEN:
+        return None
     try:
-        member = bot.get_chat_member(CHANNEL_ID, user_id)
-        return member.status in ["creator", "administrator", "member"]
-    except Exception as e:
-        logger.error(f"Erreur vérification canal : {e}")
-        return False
+        parsed = dict(parse_qsl(init_data, keep_blank_values=True))
+        received_hash = parsed.pop("hash", None)
+        if not received_hash:
+            return None
+        data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
+        secret_key = hmac.new(b"WebAppData", TOKEN.encode(), hashlib.sha256).digest()
+        calculated_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(calculated_hash, received_hash):
+            return None
+        return json.loads(parsed.get("user", "{}"))
+    except Exception:
+        return None
 
-# --- LOGIQUE D'ANALYSE DES PRIX EN TEMPS RÉEL ET IA ---
+
+# --- ANALYSE TECHNIQUE RÉELLE (EMA + RSI) — PLUS DE NOMBRE ALÉATOIRE ---
 PAIRS_CONFIG = {
     "BTCUSDT": {"type": "crypto", "symbol": "BTCUSDT", "decimals": 2, "unit": "USDT"},
     "ETHUSDT": {"type": "crypto", "symbol": "ETHUSDT", "decimals": 2, "unit": "USDT"},
     "SOLUSDT": {"type": "crypto", "symbol": "SOLUSDT", "decimals": 2, "unit": "USDT"},
-    "EURUSD": {"type": "forex", "symbol": "EURUSDT", "decimals": 5, "unit": "$"},
-    "GBPUSD": {"type": "forex", "symbol": "GBPUSDT", "decimals": 5, "unit": "$"},
+    "EURUSD": {"type": "forex", "symbol": "EURUSD", "decimals": 5, "unit": "$"},
+    "GBPUSD": {"type": "forex", "symbol": "GBPUSD", "decimals": 5, "unit": "$"},
     "USDJPY": {"type": "forex", "symbol": "USDJPY", "decimals": 3, "unit": "¥"}
 }
 
+INTERVAL_MAP = {"1": "1m", "5": "5m", "15": "15m", "60": "1h"}
+
+
 def fetch_real_price(symbol_key):
     config = PAIRS_CONFIG.get(symbol_key, PAIRS_CONFIG["BTCUSDT"])
-    try:
-        url = f"https://api.binance.com/api/v3/ticker/price?symbol={config['symbol']}"
-        res = requests.get(url, timeout=5).json()
-        if "price" in res:
-            return float(res["price"])
-    except Exception as e:
-        logger.error(f"Erreur récupération prix Binance {symbol_key}: {e}")
-
-    # Backup Forex
-    if config["type"] == "forex":
+    if config["type"] == "crypto":
         try:
-            f_res = requests.get("https://api.frankfurter.app/latest?from=EUR&to=USD", timeout=5).json()
-            if symbol_key == "EURUSD":
-                return float(f_res["rates"]["USD"])
-        except Exception:
-            pass
-
-    fallback_prices = {"BTCUSDT": 76192.35, "ETHUSDT": 2650.40, "SOLUSDT": 188.50, "EURUSD": 1.0852, "GBPUSD": 1.2940, "USDJPY": 153.20}
+            url = f"https://api.binance.com/api/v3/ticker/price?symbol={config['symbol']}"
+            res = requests.get(url, timeout=5).json()
+            if "price" in res:
+                return float(res["price"])
+        except Exception as e:
+            logger.error(f"Erreur récupération prix Binance {symbol_key}: {e}")
+    fallback_prices = {"BTCUSDT": 76192.35, "ETHUSDT": 2650.40, "SOLUSDT": 188.50,
+                        "EURUSD": 1.0852, "GBPUSD": 1.2940, "USDJPY": 153.20}
     return fallback_prices.get(symbol_key, 100.0)
 
-if bot:
-    @bot.message_handler(commands=["start"])
-    def start_cmd(msg):
-        u_id = int(msg.from_user.id)
-        u_name = msg.from_user.username or "Utilisateur"
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        args = msg.text.split()
-        ref_id = int(args[1]) if len(args) > 1 and args[1].isdigit() and int(args[1]) != u_id else None
+def compute_crypto_signal(symbol_key, tf):
+    """Signal basé sur un vrai croisement EMA 9/21 + RSI 14, calculé sur les
+    bougies réelles de Binance. Pas de génération aléatoire."""
+    config = PAIRS_CONFIG[symbol_key]
+    interval = INTERVAL_MAP.get(tf, "15m")
+    url = f"https://api.binance.com/api/v3/klines?symbol={config['symbol']}&interval={interval}&limit=100"
+    res = requests.get(url, timeout=8).json()
+    closes = [float(k[4]) for k in res]
+    series = pd.Series(closes)
 
-        with get_db() as conn:
-            c = conn.cursor()
-            c.execute("SELECT status FROM users WHERE user_id = ?", (u_id,))
-            row = c.fetchone()
-            if not row:
-                c.execute(
-                    "INSERT INTO users (user_id, username, status, funnel_step, referrer_id, last_active) VALUES (?, ?, 'PENDING', 'STARTED', ?, ?)",
-                    (u_id, u_name, ref_id, now_str)
-                )
-                if ref_id:
-                    c.execute("UPDATE users SET referrals_count = referrals_count + 1 WHERE user_id = ?", (ref_id,))
-            else:
-                c.execute("UPDATE users SET last_active = ? WHERE user_id = ?", (now_str, u_id))
-            conn.commit()
+    ema_fast = EMAIndicator(series, window=9).ema_indicator()
+    ema_slow = EMAIndicator(series, window=21).ema_indicator()
+    rsi = RSIIndicator(series, window=14).rsi()
 
-        if not check_channel_membership(u_id):
-            markup = InlineKeyboardMarkup()
-            clean_channel = CHANNEL_ID.replace("@", "")
-            markup.add(InlineKeyboardButton("📢 Rejoindre le Canal Officiel", url=f"https://t.me/{clean_channel}"))
-            markup.add(InlineKeyboardButton("✅ J'ai rejoint le canal", callback_data="check_join"))
-            bot.reply_to(msg, "🔒 **ACCÈS RESTREINT**\n\nVeuillez rejoindre le canal officiel pour commencer.", reply_markup=markup)
-            return
+    last_price = closes[-1]
+    ema_diff = ema_fast.iloc[-1] - ema_slow.iloc[-1]
+    rsi_val = rsi.iloc[-1]
 
-        send_main_menu(msg.chat.id, u_name, u_id)
+    is_buy = ema_diff > 0
 
-    @bot.callback_query_handler(func=lambda call: call.data == "check_join")
-    def callback_check_join(call):
-        u_id = int(call.from_user.id)
-        if check_channel_membership(u_id):
-            bot.answer_callback_query(call.id, "✅ Accès validé !")
-            try:
-                bot.delete_message(call.message.chat.id, call.message.message_id)
-            except Exception:
-                pass
-            send_main_menu(call.message.chat.id, call.from_user.username or "Utilisateur", u_id)
-        else:
-            bot.answer_callback_query(call.id, "❌ Vous n'avez pas encore rejoint le canal !", show_alert=True)
+    # Confiance dérivée de la force du croisement EMA + de l'écart du RSI par
+    # rapport à sa zone neutre (50) — plafonnée pour rester honnête, jamais
+    # présentée comme une certitude.
+    ema_strength = min(abs(ema_diff) / last_price * 1000, 1.0)
+    rsi_strength = min(abs(rsi_val - 50) / 50, 1.0)
+    confidence = 50 + round((ema_strength * 0.6 + rsi_strength * 0.4) * 42)
+    confidence = max(50, min(confidence, 92))
 
-    def send_main_menu(chat_id, u_name, u_id):
-        is_verified = False
-        with get_db() as conn:
-            c = conn.cursor()
-            c.execute("SELECT status FROM users WHERE user_id = ?", (int(u_id),))
-            row = c.fetchone()
-            if row and (row["status"] == "VERIFIED" or int(u_id) == ADMIN_ID):
-                is_verified = True
+    return is_buy, confidence, last_price
 
-        markup = InlineKeyboardMarkup(row_width=1)
-        user_app_url = f"{URL_MINI_APP}?uid={u_id}"
 
-        if is_verified:
-            markup.add(InlineKeyboardButton("📈 Ouvrir la Mini App Trading", web_app=telebot.types.WebAppInfo(url=user_app_url)))
-            text = (
-                f"Bienvenue *{u_name}* sur le Terminal de Trading !\n\n"
-                "✅ **Votre compte est vérifié.** Vous pouvez accéder gratuitement à tous les signaux et fonctionnalités de la Mini App ci-dessous :"
-            )
-        else:
-            markup.add(InlineKeyboardButton("📊 Inscription Exness (Code Promo: 395vyusacl)", url=EXNESS_LINK))
-            markup.add(InlineKeyboardButton("📊 Inscription KuCoin (Code Promo: rEN8V1E)", url=KUCOIN_LINK))
-            markup.add(InlineKeyboardButton("📥 Preuves d'inscription (ID + Capture d'écran)", callback_data="submit_proof"))
-
-            text = (
-                f"Bienvenue *{u_name}* sur l'IA des Signaux Trading Crypto & Forex gratuits.\n\n"
-                "🔹 **Accès à la Mini App :** Pour débloquer votre accès complet et gratuit aux signaux IA, Veuillez vous inscrire sur KuCoin ou Exness via nos liens ci-dessous, Effectuez un dépôt minimum de **10$** et Soumettez vos preuves d'inscription ici pour la validation.\n\n"
-                "⚠️ *Votre compte sera validé et votre accès débloqué par un administrateur après la vérification de vos preuves.*"
-            )
-
-        bot.send_message(chat_id, text, reply_markup=markup)
-
-    @bot.message_handler(commands=["admin"])
-    def admin_cmd(msg):
-        if int(msg.from_user.id) != ADMIN_ID and ADMIN_ID != 0:
-            bot.reply_to(msg, "❌ Accès refusé.")
-            return
-
-        with get_db() as conn:
-            c = conn.cursor()
-            c.execute("SELECT COUNT(*) as total FROM users")
-            total = c.fetchone()["total"]
-            c.execute("SELECT COUNT(*) as verified FROM users WHERE status = 'VERIFIED'")
-            verified = c.fetchone()["verified"]
-            c.execute("SELECT user_id, username, status FROM users ORDER BY last_active DESC LIMIT 10")
-            recent_users = c.fetchall()
-
-        text = f"⚙️ **PANNEAU D'ADMINISTRATION**\n\n"
-        text += f"👥 **Total Utilisateurs :** `{total}`\n"
-        text += f"✅ **Membres Validés :** `{verified}`\n\n"
-        text += "📜 **Derniers utilisateurs enregistrés :**\n"
-
-        for u in recent_users:
-            st = "✅ Validé" if u["status"] == "VERIFIED" else "⏳ En attente"
-            text += f"• `{u['user_id']}` (@{u['username'] or 'sans_pseudo'}) - {st}\n"
-
-        text += "\n*Gestion manuelle :*\n`/grant <user_id>` : Valider\n`/revoke <user_id>` : Bloquer"
-        bot.send_message(msg.chat.id, text)
-
-    @bot.message_handler(commands=["grant"])
-    def grant_access(msg):
-        if int(msg.from_user.id) != ADMIN_ID and ADMIN_ID != 0: return
-        try:
-            target_id = int(msg.text.split()[1])
-            with get_db() as conn:
-                conn.cursor().execute("UPDATE users SET status = 'VERIFIED', linked_account = 'MANUAL', funnel_step = 'COMPLETED' WHERE user_id = ?", (target_id,))
-                conn.commit()
-            bot.reply_to(msg, f"✅ L'utilisateur `{target_id}` a été validé.")
-
-            try:
-                user_app_url = f"{URL_MINI_APP}?uid={target_id}"
-                markup = InlineKeyboardMarkup()
-                markup.add(InlineKeyboardButton("📈 Ouvrir la Mini App Trading", web_app=telebot.types.WebAppInfo(url=user_app_url)))
-                bot.send_message(target_id, "🎉 **Accès Débloqué !** Votre compte a été validé.", reply_markup=markup)
-            except Exception as e:
-                logger.error(f"Erreur notification {target_id}: {e}")
-        except Exception:
-            bot.reply_to(msg, "❌ Format : `/grant 12345678`")
-
-    @bot.message_handler(commands=["revoke"])
-    def revoke_access(msg):
-        if int(msg.from_user.id) != ADMIN_ID and ADMIN_ID != 0: return
-        try:
-            target_id = int(msg.text.split()[1])
-            with get_db() as conn:
-                conn.cursor().execute("UPDATE users SET status = 'PENDING', linked_account = NULL, funnel_step = 'STARTED' WHERE user_id = ?", (target_id,))
-                conn.commit()
-            bot.reply_to(msg, f"🚫 Accès révoqué pour `{target_id}`.")
-        except Exception:
-            bot.reply_to(msg, "❌ Format : `/revoke 12345678`")
-
-    @bot.callback_query_handler(func=lambda c: c.data == "submit_proof")
-    def submit_proof_start(call):
-        u_id = call.message.chat.id
-        user_states[u_id] = "WAIT_ID"
-        update_user_activity(u_id, "WAIT_ID")
-        bot.answer_callback_query(call.id)
-        bot.send_message(u_id, "📝 **Étape 1/2 :** Entrez votre ID de compte Exness ou KuCoin :")
-
-    @bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "WAIT_ID")
-    def process_proof_id(msg):
-        u_id = msg.chat.id
-        user_temp_data[u_id] = {"account_id": msg.text.strip()}
-        user_states[u_id] = "WAIT_PHOTO"
-        update_user_activity(u_id, "WAIT_PHOTO")
-        bot.reply_to(msg, "📸 **Étape 2/2 :** Envoyez la capture d'écran de votre dépôt de 10$ minimum.")
-
-    @bot.message_handler(content_types=["photo"], func=lambda m: user_states.get(m.chat.id) == "WAIT_PHOTO")
-    def process_proof_photo(msg):
-        chat_id = msg.chat.id
-        u_id = int(msg.from_user.id)
-        photo_id = msg.photo[-1].file_id
-        acc_id = user_temp_data.get(chat_id, {}).get("account_id", "Non spécifié")
-
-        with get_db() as conn:
-            c = conn.cursor()
-            c.execute("INSERT INTO pending_validations (user_id, account_id, photo_id, created_at) VALUES (?, ?, ?, ?)",
-                      (u_id, acc_id, photo_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-            req_id = c.lastrowid
-            c.execute("UPDATE users SET funnel_step = 'PROOFS_SENT', last_active = ? WHERE user_id = ?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), u_id))
-            conn.commit()
-
-        user_states[chat_id] = None
-        bot.reply_to(msg, "✅ **Preuve reçue.** L'administrateur va vérifier votre demande.")
-
-        if ADMIN_ID != 0:
-            mk = InlineKeyboardMarkup()
-            mk.add(
-                InlineKeyboardButton("✅ Valider l'accès", callback_data=f"adm_ok_{req_id}"),
-                InlineKeyboardButton("❌ Rejeter", callback_data=f"adm_no_{req_id}")
-            )
-            bot.send_photo(ADMIN_ID, photo_id, caption=f"🔔 **DEMANDE DE VALIDATION**\nUser ID: `{u_id}`\nID Compte: `{acc_id}`", reply_markup=mk)
-
-    @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_ok_"))
-    def admin_approve(call):
-        if int(call.from_user.id) != ADMIN_ID and ADMIN_ID != 0: return
-        req_id = int(call.data.replace("adm_ok_", ""))
-        with get_db() as conn:
-            c = conn.cursor()
-            c.execute("SELECT user_id, account_id FROM pending_validations WHERE id = ?", (req_id,))
-            row = c.fetchone()
-            if row:
-                u_id = int(row["user_id"])
-                c.execute("UPDATE users SET status = 'VERIFIED', linked_account = ?, funnel_step = 'COMPLETED' WHERE user_id = ?", (str(row["account_id"]), u_id))
-                c.execute("UPDATE pending_validations SET status = 'APPROVED' WHERE id = ?", (req_id,))
-                conn.commit()
-                bot.edit_message_caption(caption="✅ **Demande Approuvée avec succès.**", chat_id=call.message.chat.id, message_id=call.message.message_id)
-
-                try:
-                    user_app_url = f"{URL_MINI_APP}?uid={u_id}"
-                    mk = InlineKeyboardMarkup()
-                    mk.add(InlineKeyboardButton("📈 Ouvrir la Mini App Trading", web_app=telebot.types.WebAppInfo(url=user_app_url)))
-                    bot.send_message(u_id, "🎉 **Félicitations ! Votre compte a été validé !**", reply_markup=mk)
-                except Exception as e:
-                    logger.error(f"Erreur notification {u_id}: {e}")
-
-    @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_no_"))
-    def admin_reject(call):
-        if int(call.from_user.id) != ADMIN_ID and ADMIN_ID != 0: return
-        req_id = int(call.data.replace("adm_no_", ""))
-        with get_db() as conn:
-            c = conn.cursor()
-            c.execute("SELECT user_id FROM pending_validations WHERE id = ?", (req_id,))
-            row = c.fetchone()
-            if row:
-                u_id = int(row["user_id"])
-                c.execute("UPDATE pending_validations SET status = 'REJECTED' WHERE id = ?", (req_id,))
-                c.execute("UPDATE users SET funnel_step = 'STARTED' WHERE user_id = ?", (u_id,))
-                conn.commit()
-                bot.edit_message_caption(caption="❌ **Demande Rejetée.**", chat_id=call.message.chat.id, message_id=call.message.message_id)
-
-def run_reminders_3h():
-    if not bot: return
-    limit_time = (datetime.now() - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
-    with get_db() as conn:
-        c = conn.cursor()
-        c.execute("""
-            SELECT user_id FROM users 
-            WHERE status = 'PENDING' 
-              AND funnel_step IN ('STARTED', 'WAIT_ID', 'WAIT_PHOTO') 
-              AND last_active <= ? 
-              AND last_reminder_sent IS NULL
-        """, (limit_time,))
-        users = c.fetchall()
-        for u in users:
-            try:
-                mk = InlineKeyboardMarkup(row_width=1)
-                mk.add(InlineKeyboardButton("📥 Envoyer Preuves (10$)", callback_data="submit_proof"))
-                bot.send_message(int(u["user_id"]), "⏰ **RAPPEL : Finalisez votre accès au Terminal IA !**", reply_markup=mk)
-                c.execute("UPDATE users SET last_reminder_sent = ? WHERE user_id = ?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), int(u["user_id"])))
-            except Exception:
-                pass
-        conn.commit()
-
-# --- NOUVELLE FONCTION : ENVOI D'ALERTES DE PRIX DANS LE CANAL ---
-def send_market_alerts():
-    if not bot or not CHANNEL_ID:
-        return
-
-    pairs = ["BTCUSDT", "ETHUSDT", "EURUSD"]
-    selected = random.choice(pairs)
-    config = PAIRS_CONFIG[selected]
-    price = fetch_real_price(selected)
-    direction = "HAUSSIER 🚀" if random.random() > 0.5 else "BAISSIER 📉"
-
-    msg = (
-        f"🚨 **ALERTE MARCHÉ EN TEMPS RÉEL**\n\n"
-        f"📊 **Actif :** `{selected}`\n"
-        f"💰 **Prix actuel :** `{price} {config['unit']}`\n"
-        f"📈 **Tendance détectée :** {direction}\n\n"
-        f"👉 _Consultez la Mini App pour obtenir le signal d'entrée exact avec TP et SL._"
-    )
-
+def compute_forex_signal(symbol_key):
+    """Forex : les données intrajournalières gratuites sont limitées. On
+    calcule une tendance réelle (SMA courte vs longue) sur l'historique
+    quotidien EUR-based de frankfurter.app, avec une confiance plus prudente
+    qu'en crypto puisque la résolution est journalière, pas intraday."""
     try:
-        markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("📈 Analyser dans la Mini App", url="https://t.me/trading_pronos_bot"))
-        bot.send_message(CHANNEL_ID, msg, reply_markup=markup)
-        logger.info(f"Alerte marché envoyée dans {CHANNEL_ID}")
+        res = requests.get(
+            "https://api.frankfurter.app/2024-01-01..?from=EUR&to=USD,GBP,JPY",
+            timeout=8
+        ).json()
+        rates = res.get("rates", {})
+        dates = sorted(rates.keys())[-20:]
+        eur_usd = [rates[d]["USD"] for d in dates]
+        eur_gbp = [rates[d]["GBP"] for d in dates]
+        eur_jpy = [rates[d]["JPY"] for d in dates]
+
+        if symbol_key == "EURUSD":
+            series_vals = eur_usd
+        elif symbol_key == "GBPUSD":
+            series_vals = [u / g for u, g in zip(eur_usd, eur_gbp)]
+        else:  # USDJPY
+            series_vals = [j / u for j, u in zip(eur_jpy, eur_usd)]
+
+        series = pd.Series(series_vals)
+        sma_short = series.rolling(5).mean().iloc[-1]
+        sma_long = series.rolling(15).mean().iloc[-1]
+        last_price = series_vals[-1]
+
+        is_buy = sma_short > sma_long
+        diff_pct = abs(sma_short - sma_long) / last_price
+        confidence = 50 + round(min(diff_pct * 2000, 1.0) * 30)  # plus prudent qu'en crypto
+        confidence = max(50, min(confidence, 80))
+        return is_buy, confidence, last_price
     except Exception as e:
-        logger.error(f"Erreur lors de l'envoi de l'alerte marché : {e}")
+        logger.error(f"Erreur signal forex {symbol_key}: {e}")
+        price = fetch_real_price(symbol_key)
+        return True, 50, price
 
-sched = BackgroundScheduler(daemon=True)
-sched.add_job(run_reminders_3h, 'interval', minutes=15)
-# Envoie une alerte automatique dans le canal toutes les 30 minutes
-sched.add_job(send_market_alerts, 'interval', minutes=30)
-sched.start()
 
-app = Flask(__name__)
-CORS(app)
-
-@app.route("/", methods=["GET"])
-@app.route("/health", methods=["GET"])
-@app.route("/ping", methods=["GET"])
-def health():
-    return jsonify({"status": "ok", "service": "Trading Bot Web Service"}), 200
-
-# ROUTE GÉNÉRATEUR DE SIGNAUX IA EN TEMPS RÉEL
-@app.route("/api/generate-signal", methods=["POST"])
-def api_generate_signal():
-    data = request.json or {}
-    symbol = data.get("symbol", "BTCUSDT").upper()
-    tf = str(data.get("timeframe", "15"))
-
+def generate_signal(symbol, tf):
     config = PAIRS_CONFIG.get(symbol, PAIRS_CONFIG["BTCUSDT"])
-    price = fetch_real_price(symbol)
+    if config["type"] == "crypto":
+        is_buy, confidence, price = compute_crypto_signal(symbol, tf)
+    else:
+        is_buy, confidence, price = compute_forex_signal(symbol)
+
     decimals = config["decimals"]
     unit = config["unit"]
-
-    direction = "BUY" if random.random() > 0.45 else "SELL"
-    probability = random.randint(82, 96)
-
     tf_multipliers = {"1": 0.002, "5": 0.005, "15": 0.009, "60": 0.018}
-    mult = tf_multipliers.get(tf, 0.009)
+    mult = tf_multipliers.get(str(tf), 0.009)
 
-    if direction == "BUY":
+    if is_buy:
         tp1 = round(price * (1 + mult), decimals)
         tp2 = round(price * (1 + mult * 1.8), decimals)
         sl = round(price * (1 - mult * 0.8), decimals)
@@ -433,20 +270,187 @@ def api_generate_signal():
         dir_text = "SELL / VENTE"
 
     fmt = f"%.{decimals}f"
-
-    return jsonify({
+    return {
         "success": True,
         "symbol": symbol,
-        "timeframe": tf,
-        "probability": probability,
+        "timeframe": str(tf),
+        "probability": confidence,
         "direction": dir_text,
-        "isBuy": direction == "BUY",
+        "isBuy": is_buy,
         "unit": unit,
         "entryPrice": f"{fmt % price} {unit}",
         "tp1": f"{fmt % tp1} {unit}",
         "tp2": f"{fmt % tp2} {unit}",
-        "sl": f"{fmt % sl} {unit}"
-    })
+        "sl": f"{fmt % sl} {unit}",
+        "disclaimer": "Signal indicatif basé sur une analyse technique réelle (EMA/RSI). "
+                       "Ne constitue pas un conseil en investissement. Le trading comporte un risque de perte en capital."
+    }
+
+
+# --- BOT TELEGRAM ---
+if bot:
+    @bot.message_handler(commands=["start"])
+    def start_cmd(msg):
+        u_id = int(msg.from_user.id)
+        u_name = msg.from_user.username or "Utilisateur"
+
+        args = msg.text.split()
+        ref_id = int(args[1]) if len(args) > 1 and args[1].isdigit() and int(args[1]) != u_id else None
+
+        add_user(u_id, u_name, ref_id)
+
+        markup = InlineKeyboardMarkup()
+        user_app_url = f"{URL_MINI_APP}?uid={u_id}"
+        markup.add(InlineKeyboardButton("🚀 Commencer", web_app=WebAppInfo(url=user_app_url)))
+
+        text = (
+            f"👋 **Bienvenue {u_name} !**\n\n"
+            "Accédez gratuitement à nos signaux Forex & Crypto basés sur une analyse technique en temps réel.\n\n"
+            "👉 Cliquez sur **Commencer** ci-dessous."
+        )
+        bot.send_message(msg.chat.id, text, reply_markup=markup)
+
+    @bot.message_handler(commands=["admin"])
+    def admin_cmd(msg):
+        if int(msg.from_user.id) != ADMIN_ID or ADMIN_ID == 0:
+            return
+
+        users = get_all_users_detailed()
+        header = f"⚙️ **PANNEAU D'ADMINISTRATION**\n\n👥 Total utilisateurs : **{len(users)}**\n\n"
+        bot.send_message(msg.chat.id, header)
+
+        if not users:
+            return
+
+        # Découpage en plusieurs messages si la liste est longue (limite Telegram ~4096 caractères)
+        chunk = ""
+        for user_id, username, ref_count in users:
+            uname = f"@{username}" if username else "(pas de username)"
+            line = f"• {user_id} — {uname} — {ref_count} filleul(s)\n"
+            if len(chunk) + len(line) > 3500:
+                bot.send_message(msg.chat.id, chunk)
+                chunk = ""
+            chunk += line
+        if chunk:
+            bot.send_message(msg.chat.id, chunk)
+
+    @bot.message_handler(commands=["broadcast"])
+    def broadcast_start(msg):
+        if int(msg.from_user.id) != ADMIN_ID or ADMIN_ID == 0:
+            return
+        sent = bot.reply_to(
+            msg,
+            "📢 Envoyez-moi maintenant le contenu à diffuser — texte, photo, vidéo, audio, note vocale, "
+            "note vidéo (cercle) ou fichier. Je reconnais automatiquement le type, pas besoin de le préciser."
+        )
+        bot.register_next_step_handler(sent, broadcast_receive)
+
+    def broadcast_receive(msg):
+        if int(msg.from_user.id) != ADMIN_ID or ADMIN_ID == 0:
+            return
+
+        user_ids = get_all_user_ids()
+        success, failed = 0, 0
+        bot.send_message(msg.chat.id, f"⏳ Diffusion auprès de {len(user_ids)} utilisateurs...")
+
+        for uid in user_ids:
+            try:
+                ct = msg.content_type
+                if ct == "text":
+                    bot.send_message(uid, msg.text)
+                elif ct == "photo":
+                    bot.send_photo(uid, msg.photo[-1].file_id, caption=msg.caption)
+                elif ct == "video":
+                    bot.send_video(uid, msg.video.file_id, caption=msg.caption)
+                elif ct == "audio":
+                    bot.send_audio(uid, msg.audio.file_id, caption=msg.caption)
+                elif ct == "voice":
+                    bot.send_voice(uid, msg.voice.file_id, caption=msg.caption)
+                elif ct == "video_note":
+                    bot.send_video_note(uid, msg.video_note.file_id)
+                elif ct == "document":
+                    bot.send_document(uid, msg.document.file_id, caption=msg.caption)
+                else:
+                    continue
+                success += 1
+            except Exception as e:
+                failed += 1
+                logger.warning(f"Échec diffusion vers {uid} : {e}")
+
+        bot.send_message(msg.chat.id, f"✅ Diffusion terminée !\n• Reçus : {success}\n• Échecs : {failed}")
+
+
+def send_market_alerts():
+    """Publie une alerte marché avec notre logo dans le canal, basée sur le
+    même calcul technique réel que la Mini App — plus de tirage aléatoire."""
+    if not bot or not CHANNEL_ID:
+        return
+    try:
+        pairs = ["BTCUSDT", "ETHUSDT", "EURUSD"]
+        selected = random.choice(pairs)  # on choisit juste QUEL actif commenter, pas le sens du signal
+        is_buy, confidence, price = generate_signal_raw(selected)
+        config = PAIRS_CONFIG[selected]
+        direction = "HAUSSIER 🚀" if is_buy else "BAISSIER 📉"
+
+        caption = (
+            f"🚨 **ALERTE MARCHÉ**\n\n"
+            f"📊 Actif : `{selected}`\n"
+            f"💰 Prix actuel : `{price} {config['unit']}`\n"
+            f"📈 Tendance (analyse technique) : {direction} — confiance {confidence}%\n\n"
+            f"⚠️ _Signal indicatif, ne constitue pas un conseil en investissement._\n"
+            f"👉 Consultez la Mini App pour le détail (entrée, TP, SL)."
+        )
+        markup = InlineKeyboardMarkup()
+        if BOT_USERNAME:
+            markup.add(InlineKeyboardButton("📈 Ouvrir la Mini App", url=f"https://t.me/{BOT_USERNAME}"))
+
+        if os.path.exists(LOGO_PATH):
+            with open(LOGO_PATH, "rb") as f:
+                bot.send_photo(CHANNEL_ID, f, caption=caption, reply_markup=markup)
+        else:
+            bot.send_message(CHANNEL_ID, caption, reply_markup=markup)
+        logger.info(f"Alerte marché envoyée dans {CHANNEL_ID}")
+    except Exception as e:
+        logger.error(f"Erreur lors de l'envoi de l'alerte marché : {e}")
+
+
+def generate_signal_raw(symbol_key):
+    config = PAIRS_CONFIG[symbol_key]
+    if config["type"] == "crypto":
+        return compute_crypto_signal(symbol_key, "15")
+    return compute_forex_signal(symbol_key)
+
+
+sched = BackgroundScheduler(daemon=True)
+# Alerte automatique dans le canal toutes les 30 minutes (aucun rappel de
+# relance n'est envoyé aux utilisateurs — cette fonctionnalité a été retirée).
+sched.add_job(send_market_alerts, 'interval', minutes=30)
+sched.start()
+
+
+# --- API WEB (FLASK) ---
+app = Flask(__name__)
+CORS(app)
+
+
+@app.route("/", methods=["GET"])
+@app.route("/health", methods=["GET"])
+@app.route("/ping", methods=["GET"])
+def health():
+    return jsonify({"status": "ok", "service": "Trading Bot Web Service"}), 200
+
+
+@app.route("/api/generate-signal", methods=["POST"])
+def api_generate_signal():
+    data = request.json or {}
+    symbol = data.get("symbol", "BTCUSDT").upper()
+    tf = str(data.get("timeframe", "15"))
+    try:
+        return jsonify(generate_signal(symbol, tf))
+    except Exception as e:
+        logger.error(f"Erreur génération signal {symbol}: {e}")
+        return jsonify({"success": False, "error": "Erreur lors du calcul du signal."}), 500
+
 
 @app.route("/api/user-status", methods=["POST"])
 def user_status():
@@ -459,69 +463,34 @@ def user_status():
     if not u_id:
         return jsonify({"error": "userId obligatoire"}), 400
 
-    with get_db() as conn:
-        c = conn.cursor()
-        c.execute("SELECT status, linked_account, referrals_count FROM users WHERE user_id = ?", (u_id,))
-        row = c.fetchone()
+    ref_count = get_user_referrals(u_id)
+    users = get_all_user_ids()
 
-        c.execute("SELECT COUNT(*) as total FROM users")
-        total_users = c.fetchone()["total"]
-        c.execute("SELECT COUNT(*) as verified FROM users WHERE status = 'VERIFIED'")
-        verified_users = c.fetchone()["verified"]
+    return jsonify({
+        "isAdmin": (u_id == ADMIN_ID and ADMIN_ID != 0),
+        "referralsCount": ref_count,
+        "stats": {"totalUsers": len(users)}
+    })
 
-        is_verified = False
-        linked = None
-        ref_count = 0
 
-        if row:
-            linked = row["linked_account"]
-            ref_count = row["referrals_count"] or 0
-            if row["status"] == "VERIFIED":
-                is_verified = True
-
-        if u_id == ADMIN_ID and ADMIN_ID != 0:
-            is_verified = True
-
-        return jsonify({
-            "isVip": is_verified,
-            "isVerified": is_verified,
-            "isAdmin": (u_id == ADMIN_ID and ADMIN_ID != 0),
-            "isLinked": bool(linked or is_verified),
-            "linkedAccount": linked,
-            "referralsCount": ref_count,
-            "stats": {
-                "totalUsers": total_users,
-                "vipUsers": verified_users
-            }
-        })
-
-@app.route("/api/admin/toggle-vip", methods=["POST"])
-def admin_toggle_vip():
+@app.route("/api/admin/users", methods=["POST"])
+def admin_users():
+    """Liste détaillée des utilisateurs pour le panneau admin web — vérifiée
+    par signature Telegram, pas par un simple ID envoyé par le client."""
     data = request.json or {}
-    try:
-        admin_id = int(data.get("adminId", 0))
-        target_id = int(data.get("targetId", 0))
-    except (ValueError, TypeError):
-        return jsonify({"success": False, "error": "IDs invalides"}), 400
+    user = verify_telegram_data(data.get("initData", ""))
+    if not user or int(user.get("id", 0)) != ADMIN_ID or ADMIN_ID == 0:
+        return jsonify({"success": False, "error": "Accès refusé."}), 403
 
-    action = data.get("action")
-    if admin_id != ADMIN_ID and ADMIN_ID != 0:
-        return jsonify({"success": False, "error": "Accès refusé"}), 403
+    users = get_all_users_detailed()
+    return jsonify({
+        "success": True,
+        "users": [{"userId": u[0], "username": u[1], "referrals": u[2]} for u in users]
+    })
 
-    with get_db() as conn:
-        c = conn.cursor()
-        if action == "grant":
-            c.execute("UPDATE users SET status = 'VERIFIED', linked_account = 'MANUAL', funnel_step = 'COMPLETED' WHERE user_id = ?", (target_id,))
-            conn.commit()
-            return jsonify({"success": True, "message": f"Accès accordé à {target_id}."})
-        elif action == "revoke":
-            c.execute("UPDATE users SET status = 'PENDING', linked_account = NULL, funnel_step = 'STARTED' WHERE user_id = ?", (target_id,))
-            conn.commit()
-            return jsonify({"success": True, "message": f"Accès révoqué pour {target_id}."})
-
-    return jsonify({"success": False, "error": "Action invalide"}), 400
 
 if __name__ == "__main__":
+    init_db()
     t = Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000))))
     t.daemon = True
     t.start()
@@ -529,3 +498,4 @@ if __name__ == "__main__":
     if bot:
         logger.info("🤖 Bot Telegram démarré !")
         bot.infinity_polling(none_stop=True, skip_pending=True)
+        
