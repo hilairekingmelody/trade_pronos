@@ -2,7 +2,9 @@ pyTelegramBotAPI==4.29.1
 python-dotenv==1.1.1
 requests
 ta
+pandas
 Flask
 flask-cors
 APScheduler
 gunicorn
+psycopg2-binary==2.9.10
