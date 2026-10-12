@@ -535,4 +535,53 @@ def api_news():
                     "id": n[0],
                     "caption": n[1],
                     "imageBase64": n[2],
-             
+                    "publishedAt": n[3].isoformat() if n[3] else None
+                } for n in news
+            ]
+        })
+    except Exception as e:
+        logger.error(f"Erreur récupération actualités: {e}")
+        return jsonify({"success": False, "news": []}), 500
+@app.route("/api/admin/publish-news", methods=["POST"])
+def api_publish_news():
+    data = request.json or {}
+    user = verify_telegram_data(data.get("initData", ""))
+    if not user or int(user.get("id", 0)) != ADMIN_ID or ADMIN_ID == 0:
+        return jsonify({"success": False, "error": "Accès refusé."}), 403
+    caption = (data.get("caption") or "").strip()
+    image_base64 = data.get("imageBase64") or None
+    if not caption and not image_base64:
+        return jsonify({"success": False, "error": "Rien à publier."}), 400
+    try:
+        add_news(caption, image_base64)
+        return jsonify({"success": True})
+    except Exception as e:
+        logger.error(f"Erreur publication actualité: {e}")
+        return jsonify({"success": False, "error": "Erreur serveur."}), 500
+
+
+@app.route("/api/admin/users", methods=["POST"])
+def admin_users():
+    """Liste détaillée des utilisateurs pour le panneau admin web — vérifiée
+    par signature Telegram, pas par un simple ID envoyé par le client."""
+    data = request.json or {}
+    user = verify_telegram_data(data.get("initData", ""))
+    if not user or int(user.get("id", 0)) != ADMIN_ID or ADMIN_ID == 0:
+        return jsonify({"success": False, "error": "Accès refusé."}), 403
+
+    users = get_all_users_detailed()
+    return jsonify({
+        "success": True,
+        "users": [{"userId": u[0], "username": u[1], "referrals": u[2]} for u in users]
+    })
+
+
+if __name__ == "__main__":
+    init_db()
+    t = Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000))))
+    t.daemon = True
+    t.start()
+    logger.info("⚡ Web Service Flask démarré !")
+    if bot:
+        logger.info("🤖 Bot Telegram démarré !")
+        bot.infinity_polling(none_stop=True, skip_pending=True)
