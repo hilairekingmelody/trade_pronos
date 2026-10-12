@@ -64,6 +64,14 @@ def init_db():
             last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS trading_news (
+            id SERIAL PRIMARY KEY,
+            caption TEXT,
+            image_base64 TEXT,
+            published_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     conn.commit()
     cur.close()
     conn.close()
@@ -110,6 +118,31 @@ def get_all_users_detailed():
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT user_id, username, referrals_count FROM trading_users ORDER BY joined_at DESC")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+def add_news(caption: str, image_base64: str):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO trading_news (caption, image_base64) VALUES (%s, %s)",
+        (caption, image_base64)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_news(limit: int = 20):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, caption, image_base64, published_at FROM trading_news ORDER BY published_at DESC LIMIT %s",
+        (limit,)
+    )
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -179,32 +212,37 @@ def fetch_real_price(symbol_key):
 def compute_crypto_signal(symbol_key, tf):
     """Signal basé sur un vrai croisement EMA 9/21 + RSI 14, calculé sur les
     bougies réelles de Binance. Pas de génération aléatoire."""
-    config = PAIRS_CONFIG[symbol_key]
-    interval = INTERVAL_MAP.get(tf, "15m")
-    url = f"https://api.binance.com/api/v3/klines?symbol={config['symbol']}&interval={interval}&limit=100"
-    res = requests.get(url, timeout=8).json()
-    closes = [float(k[4]) for k in res]
-    series = pd.Series(closes)
+    try:
+        config = PAIRS_CONFIG[symbol_key]
+        interval = INTERVAL_MAP.get(tf, "15m")
+        url = f"https://api.binance.com/api/v3/klines?symbol={config['symbol']}&interval={interval}&limit=100"
+        res = requests.get(url, timeout=8).json()
+        closes = [float(k[4]) for k in res]
+        series = pd.Series(closes)
 
-    ema_fast = EMAIndicator(series, window=9).ema_indicator()
-    ema_slow = EMAIndicator(series, window=21).ema_indicator()
-    rsi = RSIIndicator(series, window=14).rsi()
+        ema_fast = EMAIndicator(series, window=9).ema_indicator()
+        ema_slow = EMAIndicator(series, window=21).ema_indicator()
+        rsi = RSIIndicator(series, window=14).rsi()
 
-    last_price = closes[-1]
-    ema_diff = ema_fast.iloc[-1] - ema_slow.iloc[-1]
-    rsi_val = rsi.iloc[-1]
+        last_price = closes[-1]
+        ema_diff = ema_fast.iloc[-1] - ema_slow.iloc[-1]
+        rsi_val = rsi.iloc[-1]
 
-    is_buy = ema_diff > 0
+        is_buy = bool(ema_diff > 0)
 
-    # Confiance dérivée de la force du croisement EMA + de l'écart du RSI par
-    # rapport à sa zone neutre (50) — plafonnée pour rester honnête, jamais
-    # présentée comme une certitude.
-    ema_strength = min(abs(ema_diff) / last_price * 1000, 1.0)
-    rsi_strength = min(abs(rsi_val - 50) / 50, 1.0)
-    confidence = 50 + round((ema_strength * 0.6 + rsi_strength * 0.4) * 42)
-    confidence = max(50, min(confidence, 92))
+        # Confiance dérivée de la force du croisement EMA + de l'écart du RSI par
+        # rapport à sa zone neutre (50) — plafonnée pour rester honnête, jamais
+        # présentée comme une certitude.
+        ema_strength = min(abs(ema_diff) / last_price * 1000, 1.0)
+        rsi_strength = min(abs(rsi_val - 50) / 50, 1.0)
+        confidence = 50 + round((ema_strength * 0.6 + rsi_strength * 0.4) * 42)
+        confidence = int(max(50, min(confidence, 92)))
 
-    return is_buy, confidence, last_price
+        return is_buy, confidence, float(last_price)
+    except Exception as e:
+        logger.error(f"Erreur signal crypto {symbol_key}: {e}")
+        price = fetch_real_price(symbol_key)
+        return True, 50, float(price)
 
 
 def compute_forex_signal(symbol_key):
@@ -235,11 +273,11 @@ def compute_forex_signal(symbol_key):
         sma_long = series.rolling(15).mean().iloc[-1]
         last_price = series_vals[-1]
 
-        is_buy = sma_short > sma_long
+        is_buy = bool(sma_short > sma_long)
         diff_pct = abs(sma_short - sma_long) / last_price
         confidence = 50 + round(min(diff_pct * 2000, 1.0) * 30)  # plus prudent qu'en crypto
-        confidence = max(50, min(confidence, 80))
-        return is_buy, confidence, last_price
+        confidence = int(max(50, min(confidence, 80)))
+        return is_buy, confidence, float(last_price)
     except Exception as e:
         logger.error(f"Erreur signal forex {symbol_key}: {e}")
         price = fetch_real_price(symbol_key)
@@ -466,6 +504,8 @@ def user_status():
     ref_count = get_user_referrals(u_id)
     users = get_all_user_ids()
 
+    logger.info(f"[DEBUG admin-check] u_id reçu: {u_id} (type {type(u_id)}) | ADMIN_ID configuré: {ADMIN_ID} (type {type(ADMIN_ID)}) | match: {u_id == ADMIN_ID}")
+
     return jsonify({
         "isAdmin": (u_id == ADMIN_ID and ADMIN_ID != 0),
         "referralsCount": ref_count,
@@ -473,29 +513,26 @@ def user_status():
     })
 
 
-@app.route("/api/admin/users", methods=["POST"])
-def admin_users():
-    """Liste détaillée des utilisateurs pour le panneau admin web — vérifiée
-    par signature Telegram, pas par un simple ID envoyé par le client."""
-    data = request.json or {}
-    user = verify_telegram_data(data.get("initData", ""))
-    if not user or int(user.get("id", 0)) != ADMIN_ID or ADMIN_ID == 0:
-        return jsonify({"success": False, "error": "Accès refusé."}), 403
-
-    users = get_all_users_detailed()
+@app.route("/api/config", methods=["GET"])
+def api_config():
     return jsonify({
-        "success": True,
-        "users": [{"userId": u[0], "username": u[1], "referrals": u[2]} for u in users]
+        "botUsername": BOT_USERNAME,
+        "exnessLink": EXNESS_LINK,
+        "exnessPromo": EXNESS_PROMO,
+        "kucoinLink": KUCOIN_LINK,
+        "kucoinPromo": KUCOIN_PROMO
     })
 
 
-if __name__ == "__main__":
-    init_db()
-    t = Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000))))
-    t.daemon = True
-    t.start()
-    logger.info("⚡ Web Service Flask démarré !")
-    if bot:
-        logger.info("🤖 Bot Telegram démarré !")
-        bot.infinity_polling(none_stop=True, skip_pending=True)
-        
+@app.route("/api/news", methods=["GET"])
+def api_news():
+    try:
+        news = get_news()
+        return jsonify({
+            "success": True,
+            "news": [
+                {
+                    "id": n[0],
+                    "caption": n[1],
+                    "imageBase64": n[2],
+             
